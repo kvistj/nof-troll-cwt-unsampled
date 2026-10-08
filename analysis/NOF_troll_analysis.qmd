@@ -1,0 +1,1284 @@
+---
+title: "North of Falcon troll coded-wire tag auxiliary methods for the CTC ERA"
+author: "Jake T. Kvistad, Ph.D."
+bibliography: references.bibtex
+reference-section-title: "References"
+reference-location: document
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/american-fisheries-society.csl
+
+## Rendering format parameters
+format: 
+  html:
+    embed-resources: true
+  pdf:
+    keep-md: true
+    keep-tex: true
+editor: source
+
+## Execute parameters are used for default code chunk options ##
+execute: 
+  eval: true
+  message: false
+  echo: true
+  warning: false
+  error: false
+---
+
+## Background
+
+The North of Falcon Troll fisheries were identified in CTC Report 46 [@PSC2021] as missing sampling in the catch and sample reports hosted on RMIS. Missing sampling in the catch and sample reports results in an undefined CWT expansion factor because they are calculated as $Number Caught \div Number Sampled$ and missing sampling in the denominator results in a divide by zero situation. Because there is no sampling from these reporting strata, this also means that there are no coded-wire tag returns during these missing sampling periods. This all has significance for PST management because annual calendar year exploitation rates (CYER) are evaluated against the CYER average in the 2009\textendash 2015 base period and the CTC calculates CYERs by summing fishery-specific AEQ mortalities and dividing by the sum of all AEQ mortalities plus escapement (@eq-cyer). Unaccounted mortalities in any individual fishery can result in inflated total CYERs because the number of mortalities in the denominator will be underestimated. This is particularly important in the context of PST management because as our sampling coverage expands, sampling methods and technologies improve, and our CYER estimates get more accurate, they are still being compared to a base period average that is probably too low considering the extent of missing sampling during the 2009\textendash 2015 base period. This increases the risk of erroneously exceeding CYER limits outlined in the PST for any Attachment I stock. The auxiliary method described herein fills gaps in the CWT expansion factors on RMIS and estimates the expected number of ERA tag recoveries from unsampled strata in an attempt to improve mortality accounting in SUS ISBM fisheries.
+
+$$CYER_{CY,F}=\frac{\sideset{}{_\text{a=minage}^{\text{maxage}}}\sum_{}\sideset{}{_{f\in{F_{ISBM}}}}\sum_{}Morts_{CY,a,f}\cdot AEQ_{BY=CY-a,a,f}}{\sideset{}{_\text{a=minage}^{\text{maxage}}}\sum_{}\sideset{}{_\text{f=1}^{\text{NumFisheries}}}\sum_{}Morts_{CY,a,f}\cdot AEQ_{BY=CY-a,a,f}+Esc_{CY,a}}$$ {#eq-cyer}
+
+```{r}
+#| label: load libraries for making quarto documents
+#| echo: false
+
+# Libraries ---------------------------------------------------------------
+library(tidyverse)
+library(readxl)
+library(gt)
+library(MissMech)
+
+#Helper function
+assign_region <- function(stock) {
+  case_when(
+    stock %in% c('ELW','GAD','NIS','NSF','GRO','GRN','HOK','SAM','SKF','SSF',
+                 'STL','SKY','WHY','WRY','WHF','WRF','SKS','SPY') ~ "Puget Sound",
+    stock %in% c('QNT','QN2','SOO','QUE','QUI')                   ~ 'WA Coast',
+    stock %in% c('SUM','URB','SPR','LYY','LYF','HAN','KLM','MSH',
+                 'NIC','SHU','SMK')                               ~ 'Columbia River',
+    stock %in% c('ATN','BQR','CHI','CHU','COW','CKO','HAR','RBT',
+                 'NAN','DOM')                                     ~ 'Canada',
+    stock %in% c('LRH','WSH','CWF','LRW','ELK','SRH','SRN')       ~ 'Oregon',
+    stock %in% c('ALP')                                           ~ 'Alaska',
+    TRUE                                                          ~ 'Non-PST stocks'
+  )
+}
+
+# Format a number for inline reporting: thousands separator, no scientific
+# notation, rounded to `digits` decimal places. Used for every dynamic value
+# referenced in the prose so that formatting is consistent throughout.
+nfmt <- function(x, digits = 0) {
+  formatC(round(x, digits), format = 'f', digits = digits, big.mark = ',')
+}
+
+# Shared color palette: same colors for the same regions in every figure
+region_colors <- c(
+  'Alaska'         = viridis::viridis(7)[1],
+  'Canada'         = viridis::viridis(7)[2],
+  'WA Coast'       = viridis::viridis(7)[3],
+  'Puget Sound'    = viridis::viridis(7)[4],
+  'Columbia River' = viridis::viridis(7)[5],
+  'Oregon'         = viridis::viridis(7)[6],
+  'Non-PST stocks' = viridis::viridis(7)[7]
+)
+
+season_of <- function(m) ifelse(m %in% c(11, 12, 1:4), 'winter', 'summer')
+
+# Study period. Change here only; every filter and caption reads from these.
+START_YEAR <- 2005
+END_YEAR   <- 2023
+# RMIS tag_status codes counted as a CWT physically present in the fish:
+# 1 read OK, 3 lost before read, 4 not readable, 7 unresolved discrepancy.
+# Excluded: 2 no tag, 8 head not processed, 9 pseudo tag / blank wire.
+TAG_PRESENT <- c(1, 3, 4, 7)
+```
+
+```{r}
+#| echo: false
+#| label: read-data
+
+# Data --------------------------------------------------------------------
+d <- read.table(paste0("data/raw/Troll_CatchSample_", START_YEAR, "_", END_YEAR, ".txt"), 
+                sep = ',', header = T)
+
+# Filter on catch location name to NOF areas
+dat <- d |>
+  dplyr::filter(catch_location_name %in% c('MARINE AREA 1', 
+                                    'MARINE AREA 2', 
+                                    'MARINE AREA 3', 
+                                    'MARINE AREA 4',
+                                    '4B  -TREATY TROLL', 
+                                    '4 & 4B (TROLL)', 
+                                    '4 & 4B & 5 TR. TROLL', 
+                                    '4A  -TREATY TROLL',
+                                    '4 & 4B & 5 & 3 TR. TROLL')) |>
+  dplyr::filter(fishery %in% c(10, 15),  #10: Non-treaty, #15: Treaty
+                catch_year >= START_YEAR, catch_year <= END_YEAR)
+```
+
+## Data
+
+Catch and sample reports were retrieved for all troll fisheries from RMIS for the years spanning `r START_YEAR` through `r END_YEAR` and filtered to the catch location names corresponding to the North of Falcon catch areas (WA Marine Area Codes 1\textendash 4 and 4B). Both treaty and non-treaty fisheries had notable amounts of sample data either missing or reported as 0 in the catch and sample reports (@fig-missing). Since the treaty fishery catch location names in RMIS did not have a consistent definition over time, most of the treaty catch location names were renamed to a generic "3,4 TT". The treaty fishery in MA 2 did not have any sampling reported to RMIS at all since the beginning of the time series; therefore, the MA 2 treaty fishery will require its own follow up analysis to properly address.
+
+```{r}
+#| label: janitorial-services
+#| echo: false
+dat$fishery_name <- case_when(dat$fishery == 10 ~ 'Non-treaty',
+                              dat$fishery == 15 ~ 'Treaty')
+
+#Extract catch month from statistical week
+dat$catch_month <- lubridate::month(as.Date(paste0(dat$catch_year, "-", dat$period, '-', 10), format = "%Y-%W-%u"))
+dat[is.na(dat$catch_month),]$catch_month <- 12 #Fill in NAs due to weeks 53 and 54
+
+dat$catch_location_name <- case_when(
+  dat$catch_location_name == "4B  -TREATY TROLL" ~ "4B TT",
+  dat$catch_location_name == "4A  -TREATY TROLL" ~ "4A TT",
+  dat$catch_location_name == "4 & 4B (TROLL)" ~ "4 & 4B TT",
+  dat$catch_location_name == "4 & 4B & 5 TR. TROLL" ~ "4, 4B, & 5 TT",
+  dat$catch_location_name == "4 & 4B & 5 & 3 TR. TROLL" ~ "4, 4A, 4B, 5, & 3 TT",
+  dat$catch_location_name == "MARINE AREA 1" ~ "MA 1",
+  dat$catch_location_name == "MARINE AREA 2" ~ "MA 2",
+  dat$catch_location_name == "MARINE AREA 3" ~ "MA 3",
+  dat$catch_location_name == "MARINE AREA 4" ~ "MA 4"
+)
+
+#Roll up treaty troll, excluding treaty MA 2
+dat[dat$fishery == 15 & dat$catch_location_name != 'MA 2',]$catch_location_name <- '3,4 TT'
+#MA 2 TT
+MA2TT <- dat[dat$catch_location_name == 'MA 2' & dat$fishery == 15,]
+
+catch_by_month <- dat |>
+  group_by(catch_year, catch_month, fishery, catch_location_name) |>
+  summarize(number_caught = sum(number_caught, na.rm = T),
+            number_sampled = sum(number_sampled, na.rm = T),
+            number_cwt_estimated = number_caught/number_sampled,
+            number_recovered_decoded = sum(number_recovered_decoded, na.rm = T)) |>
+  ungroup()
+
+#write.csv(catch_by_month, "Auxiliaries/NOF Troll/out/catch_by_month.csv", row.names = F)
+```
+
+```{r}
+#| label: littles-mcar
+#| echo: false
+
+# Prepare data for Little's MCAR test
+# Each row is a reporting stratum, columns are the variables of interest
+# number_sampled is NA where sampling is missing
+
+mcar_dat <- catch_by_month |>
+  mutate(
+    number_sampled_na = ifelse(number_sampled == 0, NA, number_sampled),
+    fishery = as.numeric(fishery),
+    fishery_name = ifelse(fishery == 10, 'Non-tribal', 'Tribal'),
+    catch_location_num = as.numeric(as.factor(catch_location_name))
+  ) |>
+  select(
+    number_caught,
+    number_sampled_na,
+    catch_year,
+    catch_month,
+    fishery,
+    fishery_name,
+    catch_location_num,
+    catch_location_name
+  ) |>
+  as.data.frame()
+
+mcar_dat |>
+  filter(!(fishery == 15 & catch_location_name == 'MA 2')) |>
+  mutate(missing = is.na(number_sampled_na)) |>
+  ggplot(aes(x = as.factor(catch_month),
+             y = as.factor(catch_year),
+             fill = missing)) +
+  geom_tile(color = "white") +
+  xlab("Month") +
+  ylab("Year") +
+  labs(fill = "Missing sampling") +
+scale_fill_manual(values = c("FALSE" = "#440154", "TRUE" = "#E5B84B")) +
+scale_y_discrete(breaks = as.character(seq(START_YEAR, END_YEAR, by = 2))) +
+  facet_grid(~fishery_name) +
+  theme_bw() +
+  theme(text = element_text(size = 16),
+        legend.position = 'bottom')
+ggsave(filename = "out/missing_data_structure.png", width = 8, height = 7, units = "in", dpi = 300)
+
+# Run Little's MCAR test
+# result <- TestMCARNormality(mcar_dat)
+# print(result)
+```
+
+```{r}
+#| label: fig-missing
+#| fig-cap: "Sum of unsampled catch in the North of Falcon troll fisheries by month, gear type, catch location, and fishery (10 = Non-treaty, 15 = Treaty)."
+#| fig-width: 8
+#| echo: false
+
+catch_by_month |>
+  filter(number_sampled == 0) |> 
+  group_by(fishery, catch_month, catch_location_name) |>
+  summarize(sum = sum(number_caught)) |>
+  ggplot(aes(x = as.factor(catch_month), 
+             y = sum, 
+             fill = as.factor(catch_location_name))) +
+  geom_col(color = 'black') +
+  xlab("Month") +
+  ylab("Unsampled catch") +
+  labs(fill = "Catch location") +
+  scale_fill_viridis_d() +
+  facet_wrap(~fishery) +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+```
+
+Out of 2569 records, 1013 (39%) had catch reported but no sampling, 16 (0.6%) had sampling reported but no catch reported, and 3 (0.1%) had the number of fish caught reported as 0 but had a non-zero amount sampled. The first case (catch reported but no sampling) was the most common and believed to reflect a systemic dynamic in the sampling regimes in these fisheries while the other two cases are probably clerical errors.
+
+```{r}
+#| label: qaqc
+#| echo: false
+
+#Fish caught but none sampled
+dat1 <- dat[dat$number_caught > 0 & dat$number_sampled == 0,]
+#Fish sampled but catch not reported
+dat2 <- dat[is.na(dat$number_caught) & dat$number_sampled > 0,]
+#Fish caught reported as 0 but >0 fish sampled
+dat3 <- dat[dat$number_caught == 0 & !is.na(dat$number_caught),]
+#Rows done properly (i.e., numeric values present in both number caught and number sampled)
+dat4 <- dat[dat$number_caught > 0 & dat$number_sampled > 0,]
+```
+
+## Monthly Aggregation and Donor Matching
+
+The reporting strata on RMIS are statistical weeks, but not every week is sampled in the NOF troll fishery areas. Aggregating to a monthly resolution reduces the number of unsampled strata and improves the precision of expansion factors by increasing sample sizes, at the cost of smoothing within-month variability. Because the CTC runs its models on annual time steps, monthly resolution is adequate. Once expansion factors are computed monthly ($\varsigma = N^{Caught} / N^{Sampled}$), CWT recoveries from sampled weeks are expanded to the full monthly catch, so unsampled weeks within a sampled month require no separate estimate. The strata that remain unaccounted for are months in which no sampling occurred at all, and these are the target of both estimators below.
+
+The ratio estimator (Method 1) requires a sampled donor for each unsampled month. Donors were selected by nearest-neighbor matching within the same fishery and area (@eq-nearest-neighbor; Appendix A):
+
+$$s^* = \underset{s \in S_{f,a}}{\operatorname{argmin}} |t_u - t_s| \quad \text{subject to} \quad |t_u - t_s| \leq \delta$$ {#eq-nearest-neighbor}
+
+where $s^*$ is the matched donor, $S_{f,a}$ is the set of sampled strata in fishery $f$ and area $a$, $t_u$ and $t_s$ are the month midpoints of the unsampled and sampled strata, and $\delta = 90$ days is the maximum search window.
+
+## Estimating CWT Recoveries in Unsampled Strata
+
+Once CWT expansions are recalculated by monthly strata, the expected number of ERA-tagged CWT recoveries must be imputed somehow such that the recalculated expansion factors can be applied and more accurate mortality accounting can be achieved in the ERA. The number of ERA-tagged CWT recoveries in the observed catch can be obtained from the Chinook Analysis Modeling Platform (CAMP).
+
+```{r}
+#| label: stock-lookup
+#| echo: false
+
+# PST indicator stock assignments by tag code, derived from the PSC CAMP
+# database (see data/README.md). The full CAMP database is not public.
+pad_tag <- function(x) str_pad(as.character(x), width = 6, pad = '0')
+
+stock_lookup <- read.csv("data/derived/indicator_stock_lookup.csv",
+                         colClasses = c(tag_code = "character")) |>
+  mutate(tag_code = pad_tag(tag_code))
+
+stopifnot(!anyDuplicated(stock_lookup$tag_code))
+```
+
+### Method 1: Ratio Estimator
+
+The ratio estimator applies the stock-and-age composition of the nearest sampled stratum, including its untagged fraction, to the landed catch of each unsampled stratum. For an unsampled stratum $r$ and stock-age category $k$:
+
+$$\widehat{CWT}_{r,k} = L_r \cdot \frac{n_{d,k}}{N^{Sampled}_d}$$ {#eq-ratio-scalar}
+
+where $d$ is the nearest sampled donor stratum in the same fishery and area within $\delta = 90$ days (@eq-nearest-neighbor), $n_{d,k}$ is the number of CWTs of stock-age $k$ recovered in the donor, $N^{Sampled}_d$ is the number of fish sampled in the donor, and $L_r$ is the landed catch of the recipient. The ratio $n_{d,k}/N^{Sampled}_d$ is the donor's tag density for category $k$, so the estimate is on the same scale as the tag density model: the expected number of CWT-bearing fish in the landed catch. No separate expansion factor is applied. Donor recoveries are taken from the RMIS recovery data with CAMP stock labels, so non-PST stocks are included. The estimator is unbiased if tag density by stock and age is equal between donor and recipient strata.
+
+The estimator is applied after the stock-composition chunks, where the recovery data it requires are assembled (see the `ratio-estimator` chunk).
+
+### Method 2: Modeled CWT Encounter Rate
+
+An alternative approach is to model the CWT encounter rate directly and apply it to the landed catch reported in unsampled strata, using time- and area-specific stock and age compositions to resolve the resulting estimates into stock- and age-specific components. Because the encounter rate is defined per unit of sampling effort and catch is reported in every stratum regardless of whether sampling occurred, the expected number of CWT recoveries in an unsampled stratum can be estimated without reconstructing the sampling process itself.
+
+Stock and age compositions in the sampled fisheries can be derived empirically from sampling data or estimated via a model. These compositions, combined with hatchery tagging rates from release data, are then used to calculate expected CWT recoveries in unsampled fisheries. A key limitation of the empirical approach is that stock and age compositions observed in the sampled catch are assumed to hold in the unsampled catch as well. Modeling stock and age compositions in unsampled fisheries could relax this assumption, but at the cost of added analytical complexity.
+
+##### CWT Encounter Rate
+
+A core assumption of Method 1 (Ratio Estimator) was that the probability of CWT encounters is consistent across sampled and unsampled strata. This assumption is violated in practice due to a variety of factors, such as seasonal variations in run timing of the tagged PST indicator stocks and fluctuations in the abundance of unmarked fish present in the fishery. As a result, the average number of CWT encounters varies considerably within a calendar year (@fig-cwt-per-100).
+
+```{r}
+#| label: cwt-recoveries
+#| echo: false
+
+# tag_code is read as character so leading zeros survive (e.g. "062958");
+# read.table would otherwise convert it to integer and break the CAMP join.
+rmis_recovery <- read.table(file = "data/raw/NOF Troll Recoveries 2005-2025.txt",
+                            sep = ',', header = TRUE,
+                            colClasses = c(tag_code = 'character'))
+
+rmis_recovery$recovery_date <- ymd(rmis_recovery$recovery_date)
+rmis_recovery$month <- month(rmis_recovery$recovery_date)
+
+# Guard: every year with sampling must have recoveries. A missing year in the
+# download (as happened with 2015) would otherwise enter the model as zeros.
+yrs_sampled <- catch_by_month |>
+  filter(number_sampled > 0) |>
+  distinct(catch_year) |> pull()
+yrs_recov <- unique(rmis_recovery$run_year)
+stopifnot("Sampled years with no recoveries in the RMIS file" =
+            all(yrs_sampled %in% yrs_recov))
+```
+
+```{r}
+#| label: pred-new
+#| echo: false
+
+# Partition strata into observed (sampled) and predicted (unsampled).
+# No sampling model is needed: the offset GAM predicts CWT counts directly
+# from observed catch, so landed catch is the only quantity required for
+# prediction and it is reported in every stratum.
+# Partition strata by presence of sampling (independent of any model)
+catch_by_month_sampling <- catch_by_month |>
+  filter(number_sampled != 0) |>
+  as.data.frame()
+
+catch_by_month_no_sampling <- catch_by_month |>
+  filter(number_sampled == 0) |>
+  filter(!(fishery == 15 & catch_location_name == 'MA 2')) |>
+  as.data.frame()
+
+# The `type` label is set directly on each partition. (It was previously
+# derived from a `notes` column added by the removed nearest-neighbor chunk.)
+catch_by_month_all <- bind_rows(
+  catch_by_month_no_sampling |> mutate(type = 'Predicted'),
+  catch_by_month_sampling    |> mutate(type = 'Observed'))
+
+preds <- catch_by_month_all |>
+  group_by(catch_year, catch_month, catch_location_name, fishery, type) |>
+  summarize(
+    number_caught = sum(number_caught, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Prediction frame for the GAM. Column names are aligned to those used when
+# fitting; `fishery` and `recovery_location_name` are coerced to factors with
+# the levels seen in fitting so that predict() cannot encounter a new level.
+pred_dat <- preds |>
+  rename(run_year               = catch_year,
+         month                  = catch_month,
+         recovery_location_name = catch_location_name) |>
+  as.data.frame()
+```
+
+```{r}
+#| label: fig-cwt-per-100
+#| echo: false
+#| fig-cap: Median CWT recoveries per 100 landed catch in the North of Falcon Chinook troll fishery (2005--2023). One outlier removed.
+
+# Rename recovery locations to match catch-side labels (must precede aggregation)
+rmis_recovery <- rmis_recovery |>
+  filter(run_year >= START_YEAR, run_year <= END_YEAR) |>
+  mutate(recovery_location_name = case_when(
+    recovery_location_name == "4B  -TREATY TROLL"        ~ "4B TT",
+    recovery_location_name == "4A  -TREATY TROLL"        ~ "4A TT",
+    recovery_location_name == "4 & 4B (TROLL)"           ~ "4 & 4B TT",
+    recovery_location_name == "4 & 4B & 5 TR. TROLL"     ~ "4, 4B, & 5 TT",
+    recovery_location_name == "4 & 4B & 5 & 3 TR. TROLL" ~ "4, 4A, 4B, 5, & 3 TT",
+    recovery_location_name == "MARINE AREA 1"            ~ "MA 1",
+    recovery_location_name == "MARINE AREA 2"            ~ "MA 2",
+    recovery_location_name == "MARINE AREA 3"            ~ "MA 3",
+    recovery_location_name == "MARINE AREA 4"            ~ "MA 4",
+    TRUE ~ recovery_location_name)) |>
+  # Roll up treaty troll, excluding treaty MA 2 -- mirrors catch-side logic
+  mutate(recovery_location_name = ifelse(
+    fishery == 15 & recovery_location_name != 'MA 2',
+    '3,4 TT', recovery_location_name))
+
+# CWT recoveries by month, year, fishery, and area
+# Count only records where a CWT was physically present (TAG_PRESENT); heads
+# with no tag, unprocessed heads and blank wire are not CWT recoveries.
+recov <- rmis_recovery |>
+  filter(tag_status %in% TAG_PRESENT) |>
+  group_by(run_year, month, fishery, recovery_location_name) |>
+  summarize(cwt_recovs = n(), .groups = 'drop') |>
+  as.data.frame()
+
+#Generate unique ID combining month, year, fishery, and area
+recov$unique_id <- paste0(recov$run_year,'-',recov$month,'-',recov$fishery,'-',recov$recovery_location_name)
+catch_by_month$unique_id <- paste0(catch_by_month$catch_year,'-',catch_by_month$catch_month,'-',catch_by_month$fishery,'-',catch_by_month$catch_location_name)
+
+#Join catch and sample data to rmis recovery counts
+cwt_encounter <- left_join(recov, catch_by_month[,c('unique_id','number_caught','number_sampled','number_cwt_estimated')], by = 'unique_id')
+
+#Calculate CWT encounter rate
+cwt_encounter <- cwt_encounter |>
+  mutate(xi=(cwt_recovs/number_caught)) |>
+  mutate(xi=ifelse(xi >=1, 1, xi)) |>
+  mutate(xi_per100=(cwt_recovs/number_caught)*100) |>
+  mutate(month = as.integer(month)) |>
+  filter(!(fishery == 15 & recovery_location_name == 'MA 2'))
+
+p <- cwt_encounter |>
+  filter(run_year != 2022 & month != 10) |>
+  group_by(month) |>
+  summarize(mu = median(xi_per100, na.rm = TRUE)) |>
+  ggplot(aes(x = month, y = mu)) +
+  geom_col(col = 'black', fill = 'azure2') +
+  labs(caption = "Note: October 2022 data excluded as outlier") +
+  scale_x_continuous(breaks = c(3,6,9,12), limits = c(1,12)) +
+  ylab("Number per 100 landed catch") +
+  xlab('Month') +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+p
+
+ggsave(filename = "out/cwt_recovs_per100.png", plot = last_plot(), height=4.5, width = 7.5, units = "in", dpi = 300)
+```
+
+The CWT encounter rate is the frequency at which CWTs are recovered from the sampled catch (@fig-cwt-encounter-rate). Let the encounter rate expressed per unit of landed catch be denoted by $\xi$, then:
+
+$$\xi = \frac{N^{CWT}}{N^{Caught}}$$ {#eq-xi}
+
+where $N^{CWT}$ represents the number of CWTs recovered and $N^{Caught}$ represents the total number of fish caught in a particular stratum. @eq-xi describes the frequency of CWT encounters relative to the landed catch and is useful for describing seasonal and spatial variation in encounter frequency; it is not, however, the quantity that generates the observed recoveries. A coded-wire tag can only be recovered from a fish that was sampled, so the count of recoveries in a stratum is generated by the number of fish sampled and the density of tagged fish among them. Let this tag density be denoted by $\theta$:
+
+$$\theta = \frac{N^{CWT}}{N^{Sampled}}$$ {#eq-theta}
+
+Throughout, a circumflex denotes a model-derived estimate: $\theta$ is the unobserved tag density in a stratum and $\hat{\theta}$ is the value predicted by the model described below. The expected number of CWT recoveries present in the landed catch of an unsampled stratum ($CWT_{Est}$) then follows from applying $\hat{\theta}$ to the reported catch:
+
+$$CWT_{Est} = \hat{\theta}\cdot N^{Caught}$$ {#eq-cwt-est}
+
+This substitution performs the expansion from sample to catch scale; no separate expansion factor is applied. Estimating $\theta$ requires only strata in which sampling occurred, where $N^{Sampled}$ is observed by definition, so no estimate of the missing sampling is required at any point. The approach does assume that tag density in unsampled strata is consistent with tag density in sampled strata of comparable year, month, and area.
+
+```{r}
+#| label: fig-cwt-encounter-rate
+#| echo: false
+#| fig-cap: Median CWT encounter rates {@eq-xi} in the North of Falcon troll fishery (2005--2023), stratified by recovery location and month.  
+#| fig.height: 4
+#| fig.width: 7
+cwt_encounter |>
+  # filter(fishery == 10) |>
+  # filter(fishery == 15) |>
+  filter(run_year != 2022 & month != 10) |>
+  group_by(month, recovery_location_name) |>
+  summarize(median = median(xi, na.rm = T)) |>
+  ggplot(aes(x = month, y = median, color = as.factor(recovery_location_name))) +
+  geom_line() +
+  geom_point() +
+  labs(color = 'Recovery location') +
+ # xlim(c(1,12)) +
+  scale_x_continuous(breaks = c(3,6,9,12), limits = c(1,12)) +
+  ylab(bquote("CWT encounter rate (" ~ xi ~ ")")) +
+  xlab('Month') +
+  #facet_wrap(~run_year) +
+  scale_color_viridis_d() +
+  theme_bw() +
+  theme(text = element_text(size = 14))
+ggsave(filename = "out/cwt_encounter.png", plot = last_plot(), height = 4, width = 7, units = "in", dpi = 300)
+```
+
+I used a generalized additive model (GAM) to model the number of CWT recoveries directly, with sampling effort entered as an offset (@eq-gam).
+
+$$\begin{aligned}
+N^{CWT}_i &\sim \text{Tweedie}(\mu_i,\phi,p) \\
+\log(\mu_i) &= \log(N^{Sampled}_i) + \mathbf{X}_i\boldsymbol{\beta}+\sum_j f_j(x_{ij})
+\end{aligned}$$ {#eq-gam}
+
+The GAM included smooth terms $[f_j(\cdot)]$ on `run_year` and `month`, and a categorical variable modeling the parametric effect of `recovery_location_name`, where $\mathbf{X}_i$ is the $i$-th row of the parametric model matrix and $\boldsymbol{\beta}$ the vector of parametric coefficients. Because the treaty catch locations were consolidated to a single label, fishery is perfectly determined by recovery location and was not included as a separate term. Sampling effort entered as an offset with its coefficient fixed at unity, which constrains expected recoveries to scale proportionally with the number of fish sampled and makes the linear predictor an estimate of tag density; $\exp(\mathbf{X}_i\hat{\boldsymbol{\beta}}+\sum_j \hat{f}_j(x_{ij}))$ recovers $\hat{\theta}_i$ directly, and $\hat{\mu}_i$ is the expected number of recoveries. Specifying sampling effort as an offset rather than as a covariate avoids the circularity that arises when a variable appears simultaneously in the denominator of the response and among the predictors. Predictions for unsampled strata were generated by substituting $\log(N^{Caught})$ for the offset, which scales tag density to the full landed catch. I used a Tweedie distribution with a log-link because of the right-skewness in the recovery counts and the increase in variance with the mean (@fig-mean-variance). The Tweedie distribution includes a dispersion parameter ($\phi$) and a power parameter ($p$), both of which are estimated when fitting the model. The GAM was fit in R using the `mgcv` package (@Wood2011).
+
+```{r}
+#| label: gam
+#| echo: false
+#| output: false
+library(mgcv)
+
+# Fitting frame. Built from the SAMPLED CATCH STRATA, with recovery counts
+# joined on, so that sampled strata with zero recoveries are retained.
+# (Building it from the recovery table, as previously, silently dropped every
+# sampled stratum without a recovery and biased theta-hat upward.)
+recov_counts <- recov |>
+  filter(run_year >= START_YEAR, run_year <= END_YEAR) |>
+  select(run_year, month, fishery, recovery_location_name, cwt_recovs)
+
+cwt_fit_all <- catch_by_month |>
+  filter(catch_year >= START_YEAR, catch_year <= END_YEAR,
+         !(fishery == 15 & catch_location_name == 'MA 2')) |>
+  transmute(run_year = catch_year,
+            month    = as.integer(catch_month),
+            fishery,
+            recovery_location_name = catch_location_name,
+            number_caught, number_sampled) |>
+  left_join(recov_counts,
+            by = c('run_year', 'month', 'fishery', 'recovery_location_name')) |>
+  mutate(cwt_recovs = replace_na(cwt_recovs, 0L))
+
+cwt_fit <- cwt_fit_all |>
+  # Require valid sampling effort and catch
+  filter(!is.na(number_sampled), number_sampled > 0,
+         !is.na(number_caught),  number_caught > 0) |>
+  # Drop strata reporting more recoveries than sampled fish (theta > 1)
+  filter(cwt_recovs <= number_sampled) |>
+  # Offset term. At fitting this is sampling effort; at prediction the same
+  # slot is filled with log(number_caught) to scale tag density to the full
+  # landed catch (see the gam-predictions chunk).
+  mutate(log_exposure = log(number_sampled))
+
+# Recoveries reported in strata with no sampling or no catch record. These
+# cannot enter the fit and are reported as an exclusion.
+recov_unmatched <- recov_counts |>
+  anti_join(cwt_fit_all |> filter(number_sampled > 0, number_caught > 0),
+            by = c('run_year', 'month', 'fishery', 'recovery_location_name')) |>
+  filter(!(fishery == 15 & recovery_location_name == 'MA 2'))
+
+#Define area levels for modeling consistency
+cwt_fit$recovery_location_name <- factor(cwt_fit$recovery_location_name,
+                                         levels = c('3,4 TT','MA 1','MA 2','MA 3','MA 4'))
+
+# Verify the fitting frame before use
+stopifnot(sum(!is.finite(cwt_fit$log_exposure)) == 0,
+          sum(is.na(cwt_fit$cwt_recovs))        == 0,
+          max(cwt_fit$cwt_recovs / cwt_fit$number_sampled) <= 1)
+
+m <- gam(cwt_recovs ~ s(run_year) + s(month) + offset(log_exposure) +
+           recovery_location_name,
+         family = tw(link = 'log'), data = cwt_fit, method = 'REML')
+
+# ## Model diagnostics
+plot_data <- data.frame(
+  observed  = cwt_fit$cwt_recovs / cwt_fit$number_sampled,
+  fitted    = fitted(m) / cwt_fit$number_sampled,
+  residuals = residuals(m)
+)
+# 
+# obs_fit <- ggplot(plot_data, aes(x = observed, y = fitted)) +
+#   geom_point(shape = 1, size = 2) +
+#   geom_abline(slope = 1, intercept = 0, color = 'red', lty = 2) +
+#   scale_x_log10() + scale_y_log10() +
+#   labs(x = expression("Observed "*theta), y = expression("Fitted "*theta)) +
+#   theme_bw() +
+#   theme(text = element_text(size = 14))
+# 
+# resid_fit <- ggplot(plot_data, aes(x = fitted, y = residuals)) +
+#   geom_point(shape = 1, size = 2) +
+#   geom_hline(yintercept = 0) +
+#   scale_x_log10() +
+#   labs(x = expression("Fitted "*theta), y = "Deviance residuals") +
+#   theme_bw() +
+#   theme(text = element_text(size = 14))
+# 
+# cowplot::plot_grid(obs_fit, resid_fit, labels = "auto")
+
+# Power (p) and dispersion (phi) parameters
+p <- m$family$getTheta(trans = TRUE)
+phi <- m$sig2
+
+## Values referenced inline in the text -----------------------------------
+## Defining these as named objects keeps reported numbers in sync with the
+## pipeline; do not hard-code figures in the prose.
+
+n_fit       <- nrow(cwt_fit)
+n_fit_zero  <- sum(cwt_fit$cwt_recovs == 0)   # sampled strata with no recoveries
+tags_fit    <- sum(cwt_fit$cwt_recovs)
+
+# Strata and tags removed at each exclusion step
+n_excl_zero_samp <- nrow(recov_unmatched)
+tags_zero_samp   <- sum(recov_unmatched$cwt_recovs)
+theta_gt1        <- cwt_fit_all |>
+  filter(number_sampled > 0, number_caught > 0, cwt_recovs > number_sampled)
+n_excl_theta_gt1 <- nrow(theta_gt1)
+tags_theta_gt1   <- sum(theta_gt1$cwt_recovs)
+
+# Reconciliation: every recovery in the study period is either fitted or
+# accounted for by an exclusion
+stopifnot(tags_fit + tags_zero_samp + tags_theta_gt1 ==
+            sum(recov_counts$cwt_recovs[
+              !(recov_counts$fishery == 15 &
+                  recov_counts$recovery_location_name == 'MA 2')]))
+
+dev_expl <- summary(m)$dev.expl
+```
+
+```{r}
+#| label: fig-mean-variance
+#| echo: false
+#| fig-cap: !expr 'r"(a) Sampling distribution of CWT recovery counts with probability density function overlain. b) Binned mean of the recovery counts plotted against the binned variance (log scale), with the fitted Tweedie variance function $\hat{\phi}\mu^{\hat{p}}$ overlain in blue.)"'
+#| fig.height: 3
+#| fig.width: 8
+
+# Sampling distribution of the response (CWT recovery counts)
+histogram <- cwt_fit |>
+  ggplot(aes(x = cwt_recovs, y = after_stat(density))) +
+  geom_histogram(fill = 'white', color = 'black', bins = 40) +
+  geom_density(color = 'blue') +
+  #scale_x_log10() +
+  labs(x = "CWT recoveries", y = "Density") +
+  theme_bw() +
+  theme(text = element_text(size = 14))
+
+# Empirical mean-variance relationship with the fitted Tweedie variance
+# function overlain. p and phi are taken from the fitted model.
+mv <- cwt_fit |>
+  mutate(bin = ntile(fitted(m), 10)) |>
+  group_by(bin) |>
+  summarise(bin_mean = mean(cwt_recovs),
+            bin_var  = var(cwt_recovs),
+            n = n(), .groups = 'drop')
+
+quantile_plot <- ggplot(mv, aes(x = bin_mean, y = bin_var)) +
+  stat_function(fun = function(x) phi * x^p, color = 'blue') +
+  geom_point(size = 3) +
+  #scale_x_log10() + 
+  scale_y_log10() +
+  labs(x = "Binned mean count", y = "Binned log(variance)") +
+  theme_bw() +
+  theme(text = element_text(size = 14))
+
+cowplot::plot_grid(histogram, quantile_plot, labels = "auto")
+ggsave(filename = "out/cwt_encounter_variance.png", plot = last_plot(), height = 4, width = 9, units = "in", dpi = 300)
+```
+
+```{r}
+#| label: fig-k-fold-cv
+#| echo: false
+#| results: false
+#| message: false
+#| warning: false
+#| fig.height: 5.5
+#| fig.width: 9
+#| fig-cap: "Ten-fold cross-validated predictions plotted against observed values for (a) CWT recovery counts and (b) tag density ($\\theta$, recoveries per fish sampled). Axes are on a square-root scale; dashed red lines show a 1:1 relationship. Agreement on the count scale largely reflects sampling effort, which enters the model as an offset; panel b removes sampling effort and shows agreement in the quantity the model estimates. Point area in panel b is proportional to the number of fish sampled; the wider scatter among small-sample strata reflects sampling variability in observed tag density."
+#| fig-pos: "H"
+
+# K-fold cross-validation predictions
+cv_pred <- rep(NA_real_, nrow(cwt_fit))
+k <- 10
+set.seed(8202024)
+folds <- sample(1:k, nrow(cwt_fit), replace = TRUE)
+
+for(i in 1:k) {
+  train_data <- cwt_fit[folds != i, ]
+  test_data  <- cwt_fit[folds == i, ]
+  temp_model <- gam(cwt_recovs ~ s(run_year) + s(month) + offset(log_exposure) +
+                      recovery_location_name,
+                    family = tw(link = 'log'), data = train_data, method = 'REML')
+  cv_pred[folds == i] <- predict(temp_model, newdata = test_data, type = 'response')
+}
+
+# Plot cross-validation results
+# (a) counts, arithmetic axes: absolute agreement, dominated by large strata.
+# (b) tag density, theta = recoveries / fish sampled: the quantity the model
+#     estimates, with sampling effort removed. Point area scales with fish
+#     sampled, since small-sample strata carry noisy observed theta.
+cv_dat <- tibble(obs_n     = cwt_fit$cwt_recovs,
+                 cv_n      = cv_pred,
+                 n_sampled = cwt_fit$number_sampled,
+                 obs_theta = obs_n / n_sampled,
+                 cv_theta  = cv_n  / n_sampled) |>
+  filter(!is.na(cv_n))
+
+lim_n     <- range(c(cv_dat$obs_n, cv_dat$cv_n))
+lim_theta <- range(c(cv_dat$obs_theta, cv_dat$cv_theta))
+
+# Square-root axes spread the dense low end without dropping zero strata (a
+# log scale would), and keep the 1:1 line straight. Equal limits and a fixed
+# aspect ratio keep the 1:1 line at 45 degrees.
+p_cv_n <- ggplot(cv_dat, aes(x = obs_n, y = cv_n)) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', lty = 2) +
+  geom_point(shape = 21, size = 1.8, fill = 'grey40', color = 'grey15',
+             alpha = 0.5, stroke = 0.3) +
+  scale_x_sqrt(limits = lim_n, breaks = c(0, 10, 50, 200, 500, 1000, 1500)) +
+  scale_y_sqrt(limits = lim_n, breaks = c(0, 10, 50, 200, 500, 1000, 1500)) +
+  coord_fixed() +
+  labs(x = 'Observed CWT recoveries', y = 'Predicted CWT recoveries') +
+  theme_bw() + theme(text = element_text(size = 13),
+                     panel.grid.minor = element_blank())
+
+p_cv_theta <- ggplot(cv_dat, aes(x = obs_theta, y = cv_theta, size = n_sampled)) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', lty = 2) +
+  geom_point(shape = 21, fill = 'grey40', color = 'grey15',
+             alpha = 0.45, stroke = 0.3) +
+  scale_size_area(max_size = 7, breaks = c(100, 1000, 5000, 10000),
+                  labels = scales::comma) +
+  scale_x_sqrt(limits = lim_theta, breaks = c(0, 0.02, 0.1, 0.25, 0.5, 1)) +
+  scale_y_sqrt(limits = lim_theta, breaks = c(0, 0.02, 0.1, 0.25, 0.5, 1)) +
+  coord_fixed() +
+  labs(x = expression("Observed "*theta), y = expression("Predicted "*theta),
+       size = 'Fish sampled') +
+  theme_bw() + 
+  theme(text = element_text(size = 13),
+      panel.grid.minor = element_blank(),
+      legend.position = 'bottom',
+      plot.margin = margin(5.5, 25, 5.5, 5.5))   # top, right, bottom, left (pt)
+
+fig_cv <- cowplot::plot_grid(p_cv_n, p_cv_theta, labels = 'auto',
+                             align = 'h', axis = 'tb')
+fig_cv
+ggsave(filename = 'out/cwt_cv_predictions.png', fig_cv, width = 9, height = 5.5, dpi = 300, bg = 'white')
+
+ok <- !is.na(cv_pred)
+cv_calibration <- sum(cv_pred[ok]) / sum(cwt_fit$cwt_recovs[ok])
+cv_bias        <- mean(cv_pred[ok] - cwt_fit$cwt_recovs[ok])
+cv_r2          <- cor(cv_pred[ok], cwt_fit$cwt_recovs[ok])^2
+cv_rmse        <- sqrt(mean((cv_pred[ok] - cwt_fit$cwt_recovs[ok])^2))
+
+# Agreement on the tag density scale (Figure 8b); weighted by fish sampled
+theta_obs <- cwt_fit$cwt_recovs / cwt_fit$number_sampled
+theta_cv  <- cv_pred / cwt_fit$number_sampled
+cv_r2_theta   <- cor(theta_cv[ok], theta_obs[ok])^2
+cv_r2_theta_w <- cov.wt(cbind(theta_cv[ok], theta_obs[ok]),
+                        wt = cwt_fit$number_sampled[ok], cor = TRUE)$cor[1, 2]^2
+
+# Seasonal calibration (quoted in the Discussion)
+win <- season_of(cwt_fit$month) == 'winter'
+cv_cal_winter <- sum(cv_pred[win & ok])  / sum(cwt_fit$cwt_recovs[win & ok])
+cv_cal_summer <- sum(cv_pred[!win & ok]) / sum(cwt_fit$cwt_recovs[!win & ok])
+n_winter_fit  <- sum(win)
+
+# Offset-only comparison. Deviance explained is reported relative to a model
+# containing the offset alone, since sampling effort would otherwise dominate.
+m_null <- gam(cwt_recovs ~ offset(log_exposure),
+              family = tw(link = 'log'), data = cwt_fit, method = 'REML')
+
+# AIC comparison uses ML: REML likelihoods are not comparable across models
+# differing in their fixed-effect structure.
+m_ml      <- update(m,      method = 'ML')
+m_null_ml <- update(m_null, method = 'ML')
+delta_aic <- AIC(m_null_ml) - AIC(m_ml)
+
+c(calibration = cv_calibration, bias = cv_bias,
+  r2 = cv_r2, rmse = cv_rmse, delta_aic = delta_aic)
+```
+
+The model was fit to `r nfmt(n_fit)` sampled strata, including `r n_fit_zero` in which no CWTs were recovered. Because sampling effort is accounted for by the offset, deviance explained is reported relative to an offset-only model: year, month, and recovery location explained `r round(dev_expl*100, 1)`% of the remaining deviance, and the fitted model was strongly favored over the offset-only alternative ($\Delta$AIC = `r round(delta_aic, 1)`). To assess out-of-sample prediction capability, I conducted a k-fold cross validation routine (k=10). Cross-validated predictions tracked observed counts closely ($R^2$ = `r round(cv_r2, 2)`; RMSE = `r round(cv_rmse, 1)`) and reproduced aggregate recoveries to within `r round(abs(cv_calibration-1)*100, 1)`% (@fig-k-fold-cv a). Because counts scale with sampling effort, agreement on the count scale largely reflects the offset. On the tag density scale, cross-validated predictions explained `r round(cv_r2_theta_w*100)`% of the variation in observed $\theta$ when strata were weighted by the number of fish sampled (`r round(cv_r2_theta*100)`% unweighted; @fig-k-fold-cv b). Calibration was `r round(cv_cal_winter, 2)` in the `r n_winter_fit` sampled winter strata and `r round(cv_cal_summer, 2)` in summer strata. Note that cross-validation evaluates prediction within sampled strata; the assumption that tag density transports to unsampled strata cannot be tested with these data.
+
+```{r}
+#| label: gam-predictions
+#| echo: false
+#| output: false
+
+# Substitute landed catch for sampling effort in the offset. Because theta-hat
+# estimates tag density among fish caught, evaluating it against the full catch
+# rather than the sampled portion performs the sample-to-catch expansion.
+pred_dat$log_exposure <- log(pred_dat$number_caught)
+
+# verify before predicting
+sum(!is.finite(pred_dat$log_exposure))
+setdiff(unique(pred_dat$recovery_location_name), unique(cwt_fit$recovery_location_name))
+
+pred_dat$cwt_recovs <- predict(m, newdata = pred_dat, type = 'response')
+
+sum(pred_dat$cwt_recovs[pred_dat$type == 'Predicted'])   # all stocks, unsampled strata
+```
+```{r}
+#| label: additional-gam-diagnostics
+#| echo: false
+#| output: false
+
+# implied mean theta in predicted strata vs observed in fitted strata
+sum(pred_dat$cwt_recovs[pred_dat$type=='Predicted']) /
+  sum(pred_dat$number_caught[pred_dat$type=='Predicted'])
+
+sum(cwt_fit$cwt_recovs) / sum(cwt_fit$number_sampled)
+
+# how much unsampled catch is being expanded
+sum(pred_dat$number_caught[pred_dat$type=='Predicted'])
+
+pr <- pred_dat[pred_dat$type == 'Predicted', ]
+summary(pr$cwt_recovs / pr$number_caught)
+range(pr$run_year); table(pr$month)
+
+aggregate(number_caught ~ month, pr, sum)
+aggregate(number_sampled ~ month, cwt_fit, sum)   # sampled-strata effort by month
+
+#SE by month in predicted CWTs
+p_se <- predict(m, newdata = pr, type = 'link', se.fit = TRUE)
+pr$se_link <- p_se$se.fit
+aggregate(se_link ~ month, pr, mean)
+
+#Headline SE catch-weighted
+weighted.mean(pr$se_link, pr$number_caught)
+
+# Zero-recovery strata: how plausible is each zero under the fitted model?
+# A zero where many recoveries were expected points to missing recovery data
+# (as with 2015 before the re-download), not to tag-free catch.
+zero_check <- cwt_fit |>
+  mutate(expected = fitted(m)) |>
+  filter(cwt_recovs == 0) |>
+  mutate(season = ifelse(month %in% c(11, 12, 1:4), 'winter', 'summer'),
+         band   = cut(expected, c(0, 1, 3, 10, Inf),
+                      labels = c('<1', '1-3', '3-10', '>10')))
+count(zero_check, band, season)
+zero_check |> arrange(desc(expected)) |> head(15)
+```
+
+##### Stock and Age Composition
+
+Once $CWT_{Est}$ is evaluated, empirical stock and age composition data can be used to partition the estimated CWT recoveries from the unsampled strata into their stock- and age-specific components. Composition was applied using a lagging five-year window: recoveries from years $t-4$ through $t$ inform composition for year $t$. A lagging rather than centered window was used because composition in a given year reflects brood cohorts that have already recruited to the fishery; recoveries from subsequent years carry information about cohorts not yet present. The time-pooled composition for a given month and area was used as a fallback for year-month-area combinations lacking recovery data.
+
+```{r}
+#| label: stock-composition
+#| echo: false
+
+#Stock composition estimated from CWT returns
+
+#First add stock directly from CAMP if available
+cwt_releases <- stock_lookup
+
+# Standardize tag codes on both sides of the join: character, six digits with
+# leading zeros restored. A type or padding mismatch here silently sends
+# indicator-stock tags to 'Other'.
+pad_tag <- function(x) str_pad(as.character(x), width = 6, pad = '0')
+rmis_recovery$tag_code <- pad_tag(rmis_recovery$tag_code)
+cwt_releases$tag_code  <- pad_tag(cwt_releases$tag_code)
+
+# Composition uses decoded tags only (tag_status 1). Lost, unreadable and
+# unresolved tags count toward tag density but are assumed to share the
+# composition of decoded tags.
+tmp <- left_join(rmis_recovery |> filter(tag_status == 1),
+                 cwt_releases[,c("tag_code","stock","brood_year")], by = "tag_code")
+
+# If stock is not in CAMP, then it's an 'Other'
+tmp[is.na(tmp$stock),]$stock <- 'Other'
+#write.csv(tmp[is.na(tmp$stock),], file = 'Auxiliaries/NOF Troll/out/stock_missing.txt', row.names = F, quote = F)
+
+#Separate out the tag codes with no match in CAMP
+check <- tmp[tmp$stock == 'Other',] #Records without a release location code
+#unique(check$tag_code) #INVALID TAG CODES -- Check for leading zeroes
+#write.table(unique(check$tag_code), file = 'Auxiliaries/NOF Troll/out/tag_codes_check.txt', row.names = F, quote = F)
+
+#Age composition - need to pull brood year from RMIS for tag_codes that weren't in CAMP
+#For records with no stock in CAMP, join stock_location_code from RMIS and assign manually
+rmis_release <- read.table(file = "data/raw/NOF Troll Tag Releases.txt", sep = ',', header = T)
+rmis_release$tag_code_or_release_id <- as.character(rmis_release$tag_code_or_release_id)
+#Fix leading zeroes issue
+rmis_release$tag_code_or_release_id <- pad_tag(rmis_release$tag_code_or_release_id)
+
+#Add brood_year from RMIS release records
+tmp2 <- left_join(check, rmis_release[,c("tag_code_or_release_id","brood_year")], by = c("tag_code" = "tag_code_or_release_id")) |>
+  select(-brood_year.x) |>
+  rename(brood_year = "brood_year.y")
+
+#Merge back with rest of data
+res2 <- rbind(tmp[tmp$stock != 'Other',], tmp2)
+```
+
+Empirical estimates of stock and age composition can be calculated from RMIS recovery data (@fig-stock-comp). Stocks were assigned to RMIS data by joining the stock names in CAMP based on tag code. A considerable number of the recoveries in the RMIS data were unassigned, indicating considerable influence by non-PST stocks on the stock composition of the fishery. It is notable, however, that the proportion of the stock composition comprising Puget Sound stocks rises in the winter months (Nov-Apr).
+
+```{r}
+#| label: stock-age-comp
+#| echo: false
+
+#stock/age composition grouped by month, area, and fishery
+stock_age_comp <- res2 |>
+  mutate(age = run_year - brood_year) |>
+  mutate(age = ifelse(age < 0, 0, age)) |> #Truncate ages <0 to 0.
+  mutate(age = ifelse(age >= 5, 5, age)) |> #Truncate ages >5 to 5.
+  filter(age > 1) |> #Filter small number of Age <1
+  group_by(month, stock, age, recovery_location_name) |>
+  summarize(n = n(),
+            number_cwt_estimated = sum(number_cwt_estimated)) |>
+  group_by(month) |>
+  mutate(prop = n/sum(n, na.rm = T)) |>
+  mutate(region = case_when(
+    stock %in% c('ELW','GAD','NIS','NSF','GRO','GRN','HOK','SAM','SKF','SSF','STL','SKY','WHY','WRY','WHF','WRF','SKS','SPY')~"Puget Sound",
+    stock %in% c('QNT','QN2','SOO','QUE','QUI')~'WA Coast',
+    stock %in% c('SUM','URB','SPR','LYY','LYF','HAN','KLM','MSH','NIC','SHU','SMK')~'Columbia River',
+    stock %in% c('ATN','BQR','CHI','CHU','COW','CKO','HAR','RBT','NAN','DOM')~'Canada',
+    stock %in% c('LRH','WSH','CWF','LRW','ELK','SRH','SRN')~'Oregon',
+    stock %in% c('ALP')~'Alaska',
+    stock %in% 'Other'~'Non-PST stocks')) |>
+  mutate(region = factor(region, levels = c('Alaska','Canada','WA Coast','Puget Sound','Columbia River','Oregon','Non-PST stocks'))) |>
+  ungroup()
+```
+
+```{r}
+#| label: fig-stock-comp
+#| fig-cap: Empirical monthly stock (a) and age (b) composition estimated from coded-wire tag returns in the North of Falcon troll Chinook fishery (2005--2023).
+#| fig-pos: "H"
+#| fig.height: 5
+#| fig.width: 5
+#| echo: false
+
+#Empirical monthly stock composition (all years)
+stock_comp <- stock_age_comp |>
+  filter(region != 'Alaska') |> #Remove the one Alaskan recovery for visual simplicity
+  group_by(month, region) |>
+  summarize(prop = sum(prop, na.rm = T)) |>
+  ggplot(aes(x = as.factor(month), y = prop*100, fill = region)) +
+  geom_col(color = 'black') +
+  xlab("") +
+  ylab("Percent") +
+  labs(fill = "Stock origin") +
+  scale_fill_viridis_d() +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+#Empirical monthly age composition (all years)
+age_comp <- stock_age_comp |>  
+  group_by(month, age) |>
+  summarize(prop = sum(prop)) |>
+  mutate(age = factor(age, levels = c(0,1,2,3,4,5))) |> 
+  ggplot(aes(x = as.factor(month), y = prop*100, fill = age)) +
+  geom_col(color = 'black') +
+  xlab("Month") +
+  ylab("Percent") +
+  labs(fill = "Age") +
+  scale_fill_viridis_d() +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+cowplot::plot_grid(stock_comp,age_comp,ncol = 1,labels='auto',align='v')
+ggsave(filename = "out/stock_age_comp.png", plot = last_plot(), height = 8, width = 7, units = "in", dpi = 300)
+```
+
+The monthly age composition estimated from CWTs shows the fishery largely dominated by Age 3 and 4 fish, with a small increase in the number of Age 5+ fish over the summer months followed by the arrival of Age 2 and more Age 3 fish in November and December. There are currently only two tag recoveries in this fishery from the month of October and both were Age 4s.
+
+```{r}
+#| label: fig-cwt-stock-age
+#| results: false
+#| message: false
+#| warning: false
+#| fig-pos: "H"
+#| fig-cap: Predicted CWT recoveries from unsampled strata in the North of Falcon Chinook troll fishery (2005--2023) apportioned into stock and age specific components. 
+#| fig-width: 8
+#| echo: false
+#stock/age composition grouped by month, area, and fishery
+stock_age_comp <- res2 |>
+  mutate(age = run_year - brood_year) |>
+  mutate(age = ifelse(age < 0, 0, age)) |>
+  mutate(age = ifelse(age >= 5, 5, age)) |>
+  filter(age > 1) |>
+  # Expand each recovery into a lagging 5-year window: a recovery from year t
+  # informs composition for window-years t through t+4. Composition in year t
+  # reflects brood cohorts already recruited to the fishery, so the window
+  # draws only on prior and concurrent years.
+  cross_join(tibble(year_offset = 0:4)) |>
+  mutate(window_year = run_year + year_offset) |>
+  # Calculate proportions within each window_year-month-area
+  group_by(window_year, month, stock, age, recovery_location_name) |>
+  summarize(n = n(),
+            number_cwt_estimated = sum(number_cwt_estimated),
+            .groups = 'drop') |>
+  group_by(window_year, month, recovery_location_name) |>
+  mutate(prop = n / sum(n, na.rm = TRUE)) |>
+  mutate(region = case_when(
+    stock %in% c('ELW','GAD','NIS','NSF','GRO','GRN','HOK','SAM','SKF','SSF','STL','SKY','WHY','WRY','WHF','WRF','SKS','SPY') ~ "Puget Sound",
+    stock %in% c('QNT','QN2','SOO','QUE','QUI') ~ 'WA Coast',
+    stock %in% c('SUM','URB','SPR','LYY','LYF','HAN','KLM','MSH','NIC','SHU','SMK') ~ 'Columbia River',
+    stock %in% c('ATN','BQR','CHI','CHU','COW','CKO','HAR','RBT','NAN','DOM') ~ 'Canada',
+    stock %in% c('LRH','WSH','CWF','LRW','ELK','SRH','SRN') ~ 'Oregon',
+    stock %in% c('ALP') ~ 'Alaska',
+    stock %in% 'Other' ~ 'Non-PST stocks')) |>
+  mutate(region = factor(region, levels = c('Alaska','Canada','WA Coast','Puget Sound','Columbia River','Oregon','Non-PST stocks'))) |>
+  ungroup()
+
+# Create the pooled composition as a fallback
+pooled_comp <- res2 |>
+  mutate(age = run_year - brood_year) |>
+  mutate(age = ifelse(age < 0, 0, age)) |>
+  mutate(age = ifelse(age >= 5, 5, age)) |>
+  filter(age > 1) |>
+  group_by(month, stock, age, recovery_location_name) |>
+  summarize(n = n(), .groups = 'drop') |>
+  group_by(month, recovery_location_name) |>
+  mutate(prop = n / sum(n, na.rm = TRUE)) |>
+  mutate(region = case_when(
+    stock %in% c('ELW','GAD','NIS','NSF','GRO','GRN','HOK','SAM','SKF','SSF','STL','SKY','WHY','WRY','WHF','WRF','SKS','SPY') ~ "Puget Sound",
+    stock %in% c('QNT','QN2','SOO','QUE','QUI') ~ 'WA Coast',
+    stock %in% c('SUM','URB','SPR','LYY','LYF','HAN','KLM','MSH','NIC','SHU','SMK') ~ 'Columbia River',
+    stock %in% c('ATN','BQR','CHI','CHU','COW','CKO','HAR','RBT','NAN','DOM') ~ 'Canada',
+    stock %in% c('LRH','WSH','CWF','LRW','ELK','SRH','SRN') ~ 'Oregon',
+    stock %in% c('ALP') ~ 'Alaska',
+    stock %in% 'Other' ~ 'Non-PST stocks')) |>
+  mutate(region = factor(region, levels = c('Alaska','Canada','WA Coast','Puget Sound','Columbia River','Oregon','Non-PST stocks'))) |>
+  ungroup()
+
+# Partition predicted catch into stock/age components
+stock_age_comp_dat <- pred_dat |>
+  rename(year = run_year) |>
+  mutate(cwt_id = row_number()) |>
+  left_join(stock_age_comp, by = c('year' = 'window_year', 'month', 'recovery_location_name')) |>
+  mutate(cwt_by_stock_age = cwt_recovs * prop)
+
+# Split into matched and unmatched
+matched <- stock_age_comp_dat |> filter(!is.na(prop))
+unmatched <- stock_age_comp_dat |> filter(is.na(prop))
+
+# For unmatched rows, drop the empty stock/age columns and rejoin with pooled comp
+unmatched_fixed <- unmatched |>
+  select(year, month, recovery_location_name, fishery, cwt_id,
+         number_caught, cwt_recovs, type) |>
+  distinct() |>
+  left_join(pooled_comp, by = c('month', 'recovery_location_name')) |>
+  mutate(cwt_by_stock_age = cwt_recovs * prop)
+
+# Recombine
+stock_age_comp_dat <- bind_rows(matched, unmatched_fixed)
+
+## Values referenced inline in the text ---------------------------------
+pred_only <- stock_age_comp_dat |> filter(type == 'Predicted')
+
+total_pred        <- sum(pred_dat$cwt_recovs[pred_dat$type == 'Predicted'],
+                         na.rm = TRUE)
+total_apportioned <- sum(pred_only$cwt_by_stock_age, na.rm = TRUE)
+total_pst         <- sum(pred_only$cwt_by_stock_age[
+                           pred_only$region != 'Non-PST stocks'], na.rm = TRUE)
+
+# Strata that matched neither the windowed nor the pooled composition table
+n_unapportioned   <- pred_only |> ungroup() |> filter(is.na(prop)) |>
+                       distinct(cwt_id) |> nrow()
+cwt_unapportioned <- total_pred - total_apportioned
+
+# Guard: every value referenced inline must be a single number. A grouped
+# tibble upstream would otherwise render as a comma-separated vector.
+stopifnot(all(lengths(list(total_pred, total_apportioned, total_pst,
+                           n_unapportioned, cwt_unapportioned)) == 1))
+
+# Composition data density, referenced in the discussion
+comp_n <- pred_only |>
+  filter(!is.na(prop)) |>
+  group_by(cwt_id) |>
+  summarise(n_comp = sum(n, na.rm = TRUE),
+            catch  = first(number_caught), .groups = 'drop')
+n_sparse_strata <- sum(comp_n$n_comp < 10)
+pct_catch_sparse <- 100 * sum(comp_n$catch[comp_n$n_comp < 10]) /
+                          sum(pred_only$number_caught[!duplicated(pred_only$cwt_id)])
+
+# Plot -- predicted (unsampled) strata only. stock_age_comp_dat also carries
+# the observed strata, which would otherwise be stacked into the same bars.
+pred_only |>
+  filter(!is.na(region)) |>
+  group_by(region, age, fishery) |>
+  summarize(sum = sum(cwt_by_stock_age, na.rm = TRUE), .groups = "drop") |>
+  mutate(fishery = case_when(
+    fishery == 10 ~ "Non-tribal",
+    fishery == 15 ~ "Tribal",
+    TRUE          ~ as.character(fishery)
+  )) |>
+  ggplot(aes(x = age, y = sum, fill = region)) +
+  geom_bar(position = 'stack', stat = 'identity', color = 'black') +
+  labs(x = 'Age', y = 'Estimated CWT recoveries', fill = 'Stock region') +
+  scale_fill_manual(values = region_colors) +
+  theme_bw() +
+  theme(text = element_text(size = 12)) +
+  facet_wrap(~fishery)
+ggsave(filename = "out/cwt_res.png", plot = last_plot(), height = 4, width = 8, units = "in", dpi = 300)
+```
+
+```{r}
+#| label: ratio-estimator
+#| echo: false
+#| output: false
+
+# Method 1: nearest-donor ratio estimator (@eq-ratio-scalar), applied to the
+# SAME unsampled strata as the tag density model so the two are comparable.
+SEARCH_WINDOW   <- 90     # days between month midpoints
+MIN_SAMPLE_FRAC <- 0.05   # donor sampling-fraction floor, sensitivity only
+mid <- function(y, m) as.Date(sprintf('%d-%02d-15', y, m))
+
+recip <- pred_dat |>
+  filter(type == 'Predicted') |>
+  transmute(r_id    = row_number(), run_year, month,
+            area    = recovery_location_name,
+            fishery = as.character(fishery),
+            catch_r = number_caught,
+            td_pred = cwt_recovs,
+            date    = mid(run_year, month))
+
+re_rec <- res2 |>
+  ungroup() |>
+  filter(run_year >= START_YEAR, run_year <= END_YEAR) |>
+  mutate(fishery = as.character(fishery),
+         age     = pmin(pmax(run_year - brood_year, 0), 5),
+         region  = assign_region(stock))
+
+# Donors: every sampled stratum in the fitting frame, zeros included
+donors <- cwt_fit |>
+  transmute(d_year = run_year, d_month = month,
+            area = as.character(recovery_location_name),
+            fishery = as.character(fishery),
+            n_sampled_d = number_sampled, catch_d = number_caught,
+            cwt_d = cwt_recovs, d_date = mid(run_year, month))
+
+matched_re <- map_dfr(seq_len(nrow(recip)), function(i) {
+  r <- recip[i, ]
+  cand <- donors |>
+    filter(area == r$area, fishery == r$fishery) |>
+    mutate(gap = abs(as.numeric(d_date - r$date))) |>
+    filter(gap <= SEARCH_WINDOW) |>
+    arrange(gap, d_date)                       # ties: earlier donor
+  if (nrow(cand) == 0) return(NULL)
+  bind_cols(r, cand[1, ] |> select(-area, -fishery))
+})
+
+unmatched_re <- anti_join(recip, matched_re, by = 'r_id')
+
+donor_comp <- re_rec |>
+  count(d_year = run_year, d_month = month, area = recovery_location_name,
+        fishery, stock, age, region, name = 'n')
+
+# Donor tag density (all tags physically present, from cwt_fit) is split by the
+# composition of the donor's DECODED tags. Lost or unreadable tags are thereby
+# assumed to share the decoded composition, as in the tag density model.
+donor_dec <- donor_comp |>
+  group_by(d_year, d_month, area, fishery) |>
+  summarise(n_dec = sum(n), .groups = 'drop')
+
+est_re <- matched_re |>
+  left_join(donor_dec,  by = c('d_year', 'd_month', 'area', 'fishery')) |>
+  left_join(donor_comp, by = c('d_year', 'd_month', 'area', 'fishery'),
+            relationship = 'many-to-many') |>
+  mutate(n = replace_na(n, 0L), n_dec = replace_na(n_dec, 0L),
+         est = ifelse(n_dec > 0,
+                      catch_r * (cwt_d / n_sampled_d) * (n / n_dec), 0))
+
+## Values referenced inline in the text ---------------------------------
+method1_all <- sum(matched_re$catch_r * matched_re$cwt_d / matched_re$n_sampled_d)
+method1_pst <- est_re |>
+  filter(!is.na(region), region != 'Non-PST stocks') |>
+  summarise(x = sum(est)) |> pull(x)
+
+# Recoveries that cannot be apportioned: donor had tags but none decoded
+method1_unapportioned <- matched_re |>
+  left_join(donor_dec, by = c('d_year', 'd_month', 'area', 'fishery')) |>
+  filter(is.na(n_dec) | n_dec == 0) |>
+  summarise(x = sum(catch_r * cwt_d / n_sampled_d)) |> pull(x)
+
+# Components plus unapportioned must reconcile to the all-stocks total
+stopifnot(isTRUE(all.equal(sum(est_re$est) + method1_unapportioned, method1_all)))
+
+n_re_matched   <- nrow(matched_re)
+n_re_unmatched <- nrow(unmatched_re)
+catch_re_unmatched <- sum(unmatched_re$catch_r)
+td_on_matched  <- sum(matched_re$td_pred)                    # tag density, same strata
+
+low_frac        <- matched_re$n_sampled_d / matched_re$catch_d < MIN_SAMPLE_FRAC
+n_low_frac      <- sum(low_frac)
+method1_all_hi  <- sum((matched_re$catch_r * matched_re$cwt_d /
+                          matched_re$n_sampled_d)[!low_frac])
+re_scale_ratio  <- matched_re$catch_r / matched_re$n_sampled_d   # L_r / N_d
+
+winter_donors   <- matched_re |>
+  filter(season_of(month) == 'winter') |>
+  count(donor_season = season_of(d_month))
+n_winter_recip  <- sum(winter_donors$n)
+n_winter_summer_donor <- sum(winter_donors$n[winter_donors$donor_season == 'summer'])
+
+stopifnot(all(lengths(list(method1_all, method1_pst, td_on_matched,
+                           method1_all_hi, n_winter_summer_donor)) == 1))
+```
+
+```{r}
+#| label: ratio-estimator-tier2
+#| echo: false
+#| output: false
+
+# Side analysis (not part of the estimator): for strata with no donor within
+# SEARCH_WINDOW, borrow from the same fishery, area and month in the nearest
+# sampled year, up to 5 years away. Main results use tier 1 only.
+MAX_YEAR_GAP <- 5
+
+t2_match <- map_dfr(seq_len(nrow(unmatched_re)), function(i) {
+  r <- unmatched_re[i, ]
+  cand <- donors |>
+    filter(area == r$area, fishery == r$fishery, d_month == r$month) |>
+    mutate(gap = abs(d_year - r$run_year)) |>
+    filter(gap <= MAX_YEAR_GAP) |>
+    arrange(gap, d_year)
+  if (nrow(cand) == 0) return(NULL)
+  bind_cols(r, cand[1, ] |> select(-area, -fishery))
+})
+
+t2_n         <- nrow(t2_match)
+t2_zero      <- sum(t2_match$cwt_d == 0)
+t2_zero_fish <- sum(t2_match$catch_r[t2_match$cwt_d == 0])
+t2_re        <- sum(t2_match$catch_r * t2_match$cwt_d / t2_match$n_sampled_d)
+t2_td        <- sum(t2_match$td_pred)
+t2_samp_rng  <- range(t2_match$n_sampled_d)
+```
+
+```{r}
+#| label: fig-res
+#| fig-cap: "Estimated CWT recoveries in unsampled strata of the North of Falcon Chinook troll fishery (2005--2023) from the nearest-donor ratio estimator, by stock region and age."
+#| echo: false
+#| fig.width: 8
+#| fig.height: 4
+#| fig-pos: H
+
+est_re |>
+  filter(!is.na(stock), age > 1) |>
+  mutate(region  = factor(region, levels = names(region_colors)),
+         fishery = ifelse(fishery == '15', 'Tribal', 'Non-tribal')) |>
+  group_by(region, age, fishery) |>
+  summarise(sum = sum(est), .groups = 'drop') |>
+  ggplot(aes(x = age, y = sum, fill = region)) +
+  geom_col(color = 'black') +
+  labs(x = 'Age', y = 'Estimated CWT recoveries', fill = 'Stock region') +
+  scale_fill_manual(values = region_colors) +
+  theme_bw() +
+  theme(text = element_text(size = 12)) +
+  facet_wrap(~fishery)
+ggsave(filename = "out/cwt_res_re.png", plot = last_plot(), height = 4, width = 8, units = "in", dpi = 300)
+```
+
+The ratio estimator found a donor within `r SEARCH_WINDOW` days for `r n_re_matched` of the `r nrow(recip)` unsampled strata; the remaining `r n_re_unmatched` strata (`r nfmt(catch_re_unmatched)` fish) had no sampled stratum in the same fishery and area within the search window. Across matched strata, the ratio estimator estimated `r nfmt(method1_all)` CWT recoveries, of which `r nfmt(method1_pst)` (`r round(100*method1_pst/method1_all)`%) were PST indicator stocks, compared with `r nfmt(td_on_matched)` from the tag density model for the same strata. Donors sampling less than `r 100*MIN_SAMPLE_FRAC`% of their catch (`r n_low_frac` strata) contributed `r nfmt(method1_all - method1_all_hi)` of the total. Of `r n_winter_recip` winter recipients, `r n_winter_summer_donor` borrowed from a summer donor.
+
+Applying the stock and age compositions to the predicted CWT recoveries yielded the results displayed in @fig-cwt-stock-age. In sum, `r nfmt(total_pred)` additional CWT recoveries were expected to have occurred between `r START_YEAR` and `r END_YEAR` in the unsampled strata. Of those, `r nfmt(total_apportioned)` could be apportioned into stock and age components; the remainder fall in `r n_unapportioned` strata for which no CWT recoveries have been reported in the corresponding month and area over the full time series. Of the apportioned total, `r nfmt(total_pst)` were expected to be PST indicator stocks. To quantify the statistical uncertainty in the estimates, I performed a bootstrap simulation that resampled the model training data with replacement and drew stock and age compositions from their Dirichlet posteriors. Details are provided in [Appendix B](#sec-appB).
+
+Auxiliaries for the CTC ERA can be prepared by mapping the additional CWT recoveries to the appropriate tag codes. Accounting for the additional fishery mortalities in the unsampled strata should reduce bias in the CYERs and more accurately measure fishery exploitation on PST indicator stocks.
+
+## Conclusions & Recommendations
+
+The analyses contained within this brief offer a comparison of two separate methods of estimating CWT recoveries from unsampled fishery strata. The first method is a purely analytical one in which CWT recoveries are calculated with a ratio estimator assuming constant stock and age composition between sampled and unsampled fishery strata. The second method models tag density directly as a function of year, month, and recovery area, scales it to the landed catch reported in each unsampled stratum, and partitions the resulting estimates using empirical stock and age composition data.
+
+Methods differed substantially in the number of PST indicator stock CWTs estimated for the unsampled strata (Method 1: `r nfmt(method1_pst)` compared to Method 2: `r nfmt(total_pst)`). These differences may be related to the ways in which CWT recoveries are estimated in the unsampled strata. Method 1 assumes that CWT recoveries in the unsampled strata are directly proportional to the landed catch ratio of the sampled and unsampled strata (@eq-ratio-scalar); violations of this assumption, such as differences in the relative abundance of ERA-tagged fish between sampled and unsampled strata, could result in inaccurate estimates. Method 1 also requires that a temporally adjacent sampled stratum exist within the search window, and inherits whatever composition that neighbor happens to carry. By contrast, Method 2 models tag density as a smooth function of year, month, and recovery area, which relaxes the assumption of a constant encounter frequency across strata. Tag density varies systematically across months and catch areas (@fig-cwt-per-100, @fig-cwt-encounter-rate), and year, month, and area together explained `r round(dev_expl*100, 1)`% of the deviance remaining after sampling effort is accounted for ($\Delta$AIC = `r round(delta_aic, 1)` relative to an offset-only model). Modeling that variation directly is therefore preferable to borrowing wholesale from an adjacent sampled stratum.
+
+Stock composition in Method 1 was restricted to Puget Sound and WA Coast stocks (@fig-res) because they were wholly informed by the stock and age compositions of nearby sampled strata (i.e., \leq93 days away from the unsampled catch event within the same recovery area) which comprised only those stocks, whereas stock composition in Method 2 was informed by the average empirical distribution of tag recoveries that have occurred in those times and areas over the entire timescale of the dataset (2005--2023). A similar pattern was observed for age composition, although age composition differed less between methods. Differences between both methods might be explained by how each handles stock and age composition. Method 1 borrows the stock and age composition of a single nearby sampled stratum; Method 2 instead uses the composition of all CWT recoveries reported in the same month and area over a lagging five-year window, and treats that composition as uncertain by drawing it from a Dirichlet posterior rather than fixing it at the observed proportion. This matters most where recoveries are sparse: a stratum informed by one or two tags yields an observed composition that is necessarily degenerate, assigning exactly zero to every stock that happened not to appear. Additionally, the empirical stock and age composition data implies that the stock and age composition in unsampled strata (predominantly occurring over winter months) is not always consistent with the stock and age compositions in the sampled strata (predominantly occurring over the summer/fall months) (@fig-stock-comp). For example, the winter months see an increase in representation by Puget Sound stocks and trends towards younger ages in the CWT recoveries. Several limitations of Method 2 warrant note. Predictions for unsampled strata rest on the assumption that tag density is consistent with that in sampled strata of comparable year, month, and area; cross-validation evaluates prediction only within sampled strata and cannot test this assumption. Sampling effort is treated as measured without error, though a small number of strata reported recoveries in excess of the fish sampled, indicating that reported sampling is occasionally unreliable. Compositional data are thin in precisely the strata of greatest interest: `r n_sparse_strata` predicted strata, carrying `r round(pct_catch_sparse)`% of the unsampled catch, have fewer than ten CWT recoveries informing their composition, and `r n_unapportioned` strata had none at all. Finally, the treaty fishery in MA 2 is excluded from the analysis entirely and requires separate treatment.
+
+I recommend using Method 2 for the following reasons:
+
+1)  Modeling tag density directly (i.e., the GAM) produced substantially different estimates of total CWT recoveries of PST indicator stocks than Method 1. I hypothesize that the 93 day search window used by the nearest-neighbor approach in Method 1 to infill missing sampling data is too large, resulting in inappropriate CWT expansion factors; the landed catch ratios ($\tau$) used to scale CWT recovery estimates in the unsampled strata are probably too large for the same reasons. By contrast, Method 2 estimates recoveries from a tag density defined per unit of sampling effort and applies it to the catch actually reported in each unsampled stratum. It therefore does not depend on the quality of a temporal match to a neighboring sampled stratum, and it requires no estimate of how many fish would have been sampled had sampling occurred.
+
+2)  Method 2 relaxes the equal stock and age composition assumption of Method 1 by using month- and area-specific empirical compositions, and propagates the uncertainty in those compositions into the reported confidence intervals rather than treating them as known.
+
+## References
+
+::: {#refs}
+:::
+
+\newpage
+
+## Appendix A {#sec-appA}
+
+::: {.callout-note appearance="minimal"}
+**Method 1 Pseudocode**
+
+For each unsampled record $u$:
+
+1.  Identify all sampled records $S$ sharing the same fishery and catch area
+2.  Compute temporal distance $d = |t_u - t_s|$ for each $s \in S$
+3.  Select $s^* = \underset{s \in S}{\operatorname{argmin}}(d)$, subject to $d \leq \delta$
+4.  If no $s^*$ satisfies $d \leq \delta$, leave $u$ unestimated
+5.  For each stock-age category $k$, estimate $\widehat{CWT}_{u,k} = L_u \cdot n_{s^*,k} / N^{Sampled}_{s^*}$
+6.  Ties in $d$ are resolved in favor of the earlier donor; $\delta = 90$ days between month midpoints
+:::
+
+\newpage
+
+## Appendix B {#sec-appB}
+
+**Method 2 Bootstrap Uncertainty Analysis**
+
+I quantified uncertainty using a nonparametric bootstrap that propagated two independent sources of error to the final CWT estimates: error in the fitted tag density model, and error in the empirical stock and age composition used to apportion the resulting counts. I ran 1,000 bootstrap iterations. In each iteration the GAM training data were resampled with replacement and the model refit, predictions were generated for the unsampled strata by substituting landed catch for the sampling offset, and a stock and age composition vector was drawn for each stratum from its Dirichlet posterior.
+
+Composition uncertainty was treated as a multinomial sampling problem. For a stratum in which the windowed recoveries yield counts $n = (n_1,\dots,n_K)$ across $K$ stock-age categories, and with a Dirichlet prior $\text{Dir}(\alpha)$ on the composition $p$, the posterior is conjugate:
+
+$$p \mid n \sim \text{Dir}(\alpha + n)$$
+
+Counts were assembled over a fixed category grid spanning all observed stock-age combinations, so that categories unobserved in a given stratum retain positive posterior probability rather than being treated as structurally absent. I compared three priors: Jeffreys ($\alpha_k = 1/2$), uniform ($\alpha_k = 1$), and an empirical-Bayes prior centered on the time-pooled composition for that month and area ($\alpha_k = \kappa\bar{p}_k$). The first two center the prior on equal proportions across all $K$ categories, which is inconsistent with the observed composition of the fishery; the empirical-Bayes prior instead shrinks sparse strata toward the pooled composition, formalizing the borrowing that the rolling window performs implicitly. Results are reported under the empirical-Bayes prior. The 95% confidence intervals were calculated from the 2.5th and 97.5th percentiles of the bootstrap distribution and the medians (50th percentile) are reported as the central tendencies.
+
+The bootstrap median for the total estimated CWT recoveries across all stocks (including non-PST stocks) was 1,772 (95% CI: 1,532--2,008), closely matching the point estimate of `r nfmt(total_pred)`. For PST indicator stocks only, the median estimate under the empirical-Bayes prior was 1,153 (95% CI: 976--1,325).
+
+The PST estimate was insensitive to the strength of the empirical-Bayes prior, varying by less than 2% across $\kappa$ ranging from 5 to 200 (Table B1). Prior *strength* therefore has little influence on the result. Prior *centering*, by contrast, has a substantial one: priors centered on equal proportions across all $K$ categories produced PST totals roughly 35% higher than the empirical-Bayes prior. Because a single non-PST category accounts for a large share of observed recoveries, distributing prior mass evenly across categories mechanically inflates the estimated PST share. That the three priors do not converge indicates that the sparse strata carry limited independent compositional information -- the same limitation quantified in the main text, where `r n_sparse_strata` of the predicted strata, carrying `r round(pct_catch_sparse)`% of the unsampled catch, have fewer than ten CWT recoveries informing their composition.
+
+| Prior | $\kappa$ | Median | 95% CI |
+|:------|------:|-------:|:-----------|
+| Empirical Bayes | 5   | 1,136 | 931--1,348 |
+| Empirical Bayes | 25  | 1,147 | 974--1,330 |
+| Empirical Bayes | 50  | 1,153 | 976--1,325 |
+| Empirical Bayes | 200 | 1,149 | 993--1,322 |
+| Jeffreys ($\alpha_k = 1/2$) | -- | 1,508 | 1,293--1,727 |
+| Uniform ($\alpha_k = 1$)    | -- | 1,568 | 1,344--1,795 |
+
+: Sensitivity of the estimated PST indicator stock total to the choice of Dirichlet prior. {#tbl-prior-sensitivity}
+
+The upper bound of the 95% credible interval for PST stocks remained well below the Method 1 estimate of `r nfmt(method1_pst)`, indicating that the discrepancy between methods is not attributable to statistical uncertainty in Method 2. A small number of bootstrap iterations (fewer than 1 in 500) failed to converge when a resample contained too few unique values of `run_year` or `month` to support the default basis dimension; these iterations were discarded.
+
+\newpage
+
+```{=latex}
+\begin{center}
+\includegraphics[width=0.8\textwidth]{out/method2_prior_comparison.png}
+
+\textbf{Figure B1.} Bootstrap distributions of total estimated CWT recoveries from unsampled strata under the empirical-Bayes prior. Dashed blue lines indicate median estimates and dashed red lines indicate 95\% confidence intervals.
+\end{center}
+```
