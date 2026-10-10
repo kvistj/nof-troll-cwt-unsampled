@@ -1,18 +1,12 @@
 ---
-title: "North of Falcon troll coded-wire tag auxiliary methods for the CTC ERA"
+title: "Analysis notebook: estimating coded-wire tag recoveries in unsampled strata of the North of Falcon Chinook Salmon troll fishery"
 author: "Jake T. Kvistad, Ph.D."
-bibliography: references.bibtex
-reference-section-title: "References"
-reference-location: document
-csl: https://raw.githubusercontent.com/citation-style-language/styles/master/american-fisheries-society.csl
 
 ## Rendering format parameters
-format: 
+format:
   html:
     embed-resources: true
-  pdf:
-    keep-md: true
-    keep-tex: true
+    toc: true
 editor: source
 
 ## Execute parameters are used for default code chunk options ##
@@ -24,11 +18,13 @@ execute:
   error: false
 ---
 
-## Background
+## About this notebook
 
-The North of Falcon Troll fisheries were identified in CTC Report 46 [@PSC2021] as missing sampling in the catch and sample reports hosted on RMIS. Missing sampling in the catch and sample reports results in an undefined CWT expansion factor because they are calculated as $Number Caught \div Number Sampled$ and missing sampling in the denominator results in a divide by zero situation. Because there is no sampling from these reporting strata, this also means that there are no coded-wire tag returns during these missing sampling periods. This all has significance for PST management because annual calendar year exploitation rates (CYER) are evaluated against the CYER average in the 2009\textendash 2015 base period and the CTC calculates CYERs by summing fishery-specific AEQ mortalities and dividing by the sum of all AEQ mortalities plus escapement (@eq-cyer). Unaccounted mortalities in any individual fishery can result in inflated total CYERs because the number of mortalities in the denominator will be underestimated. This is particularly important in the context of PST management because as our sampling coverage expands, sampling methods and technologies improve, and our CYER estimates get more accurate, they are still being compared to a base period average that is probably too low considering the extent of missing sampling during the 2009\textendash 2015 base period. This increases the risk of erroneously exceeding CYER limits outlined in the PST for any Attachment I stock. The auxiliary method described herein fills gaps in the CWT expansion factors on RMIS and estimates the expected number of ERA tag recoveries from unsampled strata in an attempt to improve mortality accounting in SUS ISBM fisheries.
+This notebook contains the data preparation, tag density model, stock and age composition, and ratio estimator code behind the manuscript *Estimating missing coded-wire tag recoveries from unsampled strata in a mixed-stock Chinook Salmon troll fishery under a non-random missingness structure* (Kvistad, *North American Journal of Fisheries Management*). The manuscript is the authoritative description of the methods and results; the text here is a brief guide to the code. Every number quoted below is computed inline from the objects created in this document.
 
-$$CYER_{CY,F}=\frac{\sideset{}{_\text{a=minage}^{\text{maxage}}}\sum_{}\sideset{}{_{f\in{F_{ISBM}}}}\sum_{}Morts_{CY,a,f}\cdot AEQ_{BY=CY-a,a,f}}{\sideset{}{_\text{a=minage}^{\text{maxage}}}\sum_{}\sideset{}{_\text{f=1}^{\text{NumFisheries}}}\sum_{}Morts_{CY,a,f}\cdot AEQ_{BY=CY-a,a,f}+Esc_{CY,a}}$$ {#eq-cyer}
+Uncertainty intervals, the Dirichlet prior sensitivity analysis (Table S1), and the hold-out evaluation are produced by separate scripts in `R/` that use the objects created here. Run `R/run_all.R` from the repository root to reproduce everything.
+
+**Context.** The North of Falcon troll fisheries (Washington Marine Areas 1–4 and 4B) were identified in CTC Report 46 (PSC 2021) as having catch without sampling in the RMIS catch and sample reports. A CWT expansion factor ($N^{Caught} / N^{Sampled}$) is undefined when nothing is sampled, and no CWTs are recovered from those strata, so tagged fish in that catch are missing from the CTC exploitation rate analysis. Unaccounted fishery mortality biases calendar year exploitation rates (CYERs) for PST indicator stocks. This analysis estimates the CWT recoveries, by stock and age, expected in the unsampled catch.
 
 ```{r}
 #| label: load libraries for making quarto documents
@@ -110,7 +106,9 @@ dat <- d |>
 
 ## Data
 
-Catch and sample reports were retrieved for all troll fisheries from RMIS for the years spanning `r START_YEAR` through `r END_YEAR` and filtered to the catch location names corresponding to the North of Falcon catch areas (WA Marine Area Codes 1\textendash 4 and 4B). Both treaty and non-treaty fisheries had notable amounts of sample data either missing or reported as 0 in the catch and sample reports (@fig-missing). Since the treaty fishery catch location names in RMIS did not have a consistent definition over time, most of the treaty catch location names were renamed to a generic "3,4 TT". The treaty fishery in MA 2 did not have any sampling reported to RMIS at all since the beginning of the time series; therefore, the MA 2 treaty fishery will require its own follow up analysis to properly address.
+Catch and sample reports for all troll fisheries were retrieved from RMIS for `r START_YEAR`–`r END_YEAR` and filtered to the North of Falcon catch areas (Washington Marine Areas 1–4 and 4B). Both treaty and non-treaty fisheries have substantial catch with no sampling (@fig-missing). Treaty catch location names in RMIS were not defined consistently over time, so treaty areas other than Marine Area 2 were consolidated to a single "3,4 TT" label. The Marine Area 2 treaty fishery has no sampling in the full time series and is excluded.
+
+Little's MCAR test (manuscript Methods) uses the stratum-level data prepared in the `littles-mcar` chunk.
 
 ```{r}
 #| label: janitorial-services
@@ -223,7 +221,7 @@ catch_by_month |>
   theme(text = element_text(size = 12))
 ```
 
-Out of 2569 records, 1013 (39%) had catch reported but no sampling, 16 (0.6%) had sampling reported but no catch reported, and 3 (0.1%) had the number of fish caught reported as 0 but had a non-zero amount sampled. The first case (catch reported but no sampling) was the most common and believed to reflect a systemic dynamic in the sampling regimes in these fisheries while the other two cases are probably clerical errors.
+The `qaqc` chunk below separates catch and sample records into those with catch but no sampling (`dat1`), sampling but no reported catch (`dat2`), zero catch with non-zero sampling (`dat3`), and complete records (`dat4`). The latter two anomalous cases are treated as clerical errors and excluded.
 
 ```{r}
 #| label: qaqc
@@ -239,19 +237,13 @@ dat3 <- dat[dat$number_caught == 0 & !is.na(dat$number_caught),]
 dat4 <- dat[dat$number_caught > 0 & dat$number_sampled > 0,]
 ```
 
-## Monthly Aggregation and Donor Matching
+## Monthly strata
 
-The reporting strata on RMIS are statistical weeks, but not every week is sampled in the NOF troll fishery areas. Aggregating to a monthly resolution reduces the number of unsampled strata and improves the precision of expansion factors by increasing sample sizes, at the cost of smoothing within-month variability. Because the CTC runs its models on annual time steps, monthly resolution is adequate. Once expansion factors are computed monthly ($\varsigma = N^{Caught} / N^{Sampled}$), CWT recoveries from sampled weeks are expanded to the full monthly catch, so unsampled weeks within a sampled month require no separate estimate. The strata that remain unaccounted for are months in which no sampling occurred at all, and these are the target of both estimators below.
+RMIS reporting strata are statistical weeks. Catch and sampling are aggregated to months (year × month × fishery × area), so recoveries from sampled weeks expand to the full monthly catch and unsampled weeks within a sampled month need no separate estimate. The strata that remain are months with catch but no sampling at all; both estimators target these.
 
-The ratio estimator (Method 1) requires a sampled donor for each unsampled month. Donors were selected by nearest-neighbor matching within the same fishery and area (@eq-nearest-neighbor; Appendix A):
+## Stock assignments
 
-$$s^* = \underset{s \in S_{f,a}}{\operatorname{argmin}} |t_u - t_s| \quad \text{subject to} \quad |t_u - t_s| \leq \delta$$ {#eq-nearest-neighbor}
-
-where $s^*$ is the matched donor, $S_{f,a}$ is the set of sampled strata in fishery $f$ and area $a$, $t_u$ and $t_s$ are the month midpoints of the unsampled and sampled strata, and $\delta = 90$ days is the maximum search window.
-
-## Estimating CWT Recoveries in Unsampled Strata
-
-Once CWT expansions are recalculated by monthly strata, the expected number of ERA-tagged CWT recoveries must be imputed somehow such that the recalculated expansion factors can be applied and more accurate mortality accounting can be achieved in the ERA. The number of ERA-tagged CWT recoveries in the observed catch can be obtained from the Chinook Analysis Modeling Platform (CAMP).
+PST indicator stock and brood year are assigned to each recovered tag code from a lookup derived from the Pacific Salmon Commission's Chinook Analysis Modeling Platform (CAMP; see `data/README.md`). Tag codes not in the lookup are non-PST stocks.
 
 ```{r}
 #| label: stock-lookup
@@ -268,25 +260,9 @@ stock_lookup <- read.csv("data/derived/indicator_stock_lookup.csv",
 stopifnot(!anyDuplicated(stock_lookup$tag_code))
 ```
 
-### Method 1: Ratio Estimator
+## Tag density
 
-The ratio estimator applies the stock-and-age composition of the nearest sampled stratum, including its untagged fraction, to the landed catch of each unsampled stratum. For an unsampled stratum $r$ and stock-age category $k$:
-
-$$\widehat{CWT}_{r,k} = L_r \cdot \frac{n_{d,k}}{N^{Sampled}_d}$$ {#eq-ratio-scalar}
-
-where $d$ is the nearest sampled donor stratum in the same fishery and area within $\delta = 90$ days (@eq-nearest-neighbor), $n_{d,k}$ is the number of CWTs of stock-age $k$ recovered in the donor, $N^{Sampled}_d$ is the number of fish sampled in the donor, and $L_r$ is the landed catch of the recipient. The ratio $n_{d,k}/N^{Sampled}_d$ is the donor's tag density for category $k$, so the estimate is on the same scale as the tag density model: the expected number of CWT-bearing fish in the landed catch. No separate expansion factor is applied. Donor recoveries are taken from the RMIS recovery data with CAMP stock labels, so non-PST stocks are included. The estimator is unbiased if tag density by stock and age is equal between donor and recipient strata.
-
-The estimator is applied after the stock-composition chunks, where the recovery data it requires are assembled (see the `ratio-estimator` chunk).
-
-### Method 2: Modeled CWT Encounter Rate
-
-An alternative approach is to model the CWT encounter rate directly and apply it to the landed catch reported in unsampled strata, using time- and area-specific stock and age compositions to resolve the resulting estimates into stock- and age-specific components. Because the encounter rate is defined per unit of sampling effort and catch is reported in every stratum regardless of whether sampling occurred, the expected number of CWT recoveries in an unsampled stratum can be estimated without reconstructing the sampling process itself.
-
-Stock and age compositions in the sampled fisheries can be derived empirically from sampling data or estimated via a model. These compositions, combined with hatchery tagging rates from release data, are then used to calculate expected CWT recoveries in unsampled fisheries. A key limitation of the empirical approach is that stock and age compositions observed in the sampled catch are assumed to hold in the unsampled catch as well. Modeling stock and age compositions in unsampled fisheries could relax this assumption, but at the cost of added analytical complexity.
-
-##### CWT Encounter Rate
-
-A core assumption of Method 1 (Ratio Estimator) was that the probability of CWT encounters is consistent across sampled and unsampled strata. This assumption is violated in practice due to a variety of factors, such as seasonal variations in run timing of the tagged PST indicator stocks and fluctuations in the abundance of unmarked fish present in the fishery. As a result, the average number of CWT encounters varies considerably within a calendar year (@fig-cwt-per-100).
+CWT recoveries are counted from the RMIS recovery file using only records with a tag physically present (`TAG_PRESENT`: tag status 1, 3, 4 or 7). Recoveries per landed fish vary strongly by month (@fig-cwt-per-100), so tag density cannot be assumed constant across sampled and unsampled strata.
 
 ```{r}
 #| label: cwt-recoveries
@@ -417,19 +393,13 @@ p
 ggsave(filename = "out/cwt_recovs_per100.png", plot = last_plot(), height=4.5, width = 7.5, units = "in", dpi = 300)
 ```
 
-The CWT encounter rate is the frequency at which CWTs are recovered from the sampled catch (@fig-cwt-encounter-rate). Let the encounter rate expressed per unit of landed catch be denoted by $\xi$, then:
+The encounter rate per landed fish, $\xi = N^{CWT}/N^{Caught}$ (@eq-xi; @fig-cwt-encounter-rate), describes seasonal and spatial variation in recoveries. The model, however, estimates tag density among sampled fish:
 
 $$\xi = \frac{N^{CWT}}{N^{Caught}}$$ {#eq-xi}
 
-where $N^{CWT}$ represents the number of CWTs recovered and $N^{Caught}$ represents the total number of fish caught in a particular stratum. @eq-xi describes the frequency of CWT encounters relative to the landed catch and is useful for describing seasonal and spatial variation in encounter frequency; it is not, however, the quantity that generates the observed recoveries. A coded-wire tag can only be recovered from a fish that was sampled, so the count of recoveries in a stratum is generated by the number of fish sampled and the density of tagged fish among them. Let this tag density be denoted by $\theta$:
-
 $$\theta = \frac{N^{CWT}}{N^{Sampled}}$$ {#eq-theta}
 
-Throughout, a circumflex denotes a model-derived estimate: $\theta$ is the unobserved tag density in a stratum and $\hat{\theta}$ is the value predicted by the model described below. The expected number of CWT recoveries present in the landed catch of an unsampled stratum ($CWT_{Est}$) then follows from applying $\hat{\theta}$ to the reported catch:
-
-$$CWT_{Est} = \hat{\theta}\cdot N^{Caught}$$ {#eq-cwt-est}
-
-This substitution performs the expansion from sample to catch scale; no separate expansion factor is applied. Estimating $\theta$ requires only strata in which sampling occurred, where $N^{Sampled}$ is observed by definition, so no estimate of the missing sampling is required at any point. The approach does assume that tag density in unsampled strata is consistent with tag density in sampled strata of comparable year, month, and area.
+Expected recoveries in the landed catch of an unsampled stratum follow from applying the predicted tag density to the reported catch, $\widehat{CWT} = \hat{\theta}\cdot N^{Caught}$. No estimate of the missing sampling is needed.
 
 ```{r}
 #| label: fig-cwt-encounter-rate
@@ -458,14 +428,16 @@ cwt_encounter |>
 ggsave(filename = "out/cwt_encounter.png", plot = last_plot(), height = 4, width = 7, units = "in", dpi = 300)
 ```
 
-I used a generalized additive model (GAM) to model the number of CWT recoveries directly, with sampling effort entered as an offset (@eq-gam).
+### Tag density model
+
+Recovery counts are modeled with a Tweedie GAM (log link) fit in `mgcv` (Wood 2011), with sampling effort as an offset (@eq-gam):
 
 $$\begin{aligned}
 N^{CWT}_i &\sim \text{Tweedie}(\mu_i,\phi,p) \\
 \log(\mu_i) &= \log(N^{Sampled}_i) + \mathbf{X}_i\boldsymbol{\beta}+\sum_j f_j(x_{ij})
 \end{aligned}$$ {#eq-gam}
 
-The GAM included smooth terms $[f_j(\cdot)]$ on `run_year` and `month`, and a categorical variable modeling the parametric effect of `recovery_location_name`, where $\mathbf{X}_i$ is the $i$-th row of the parametric model matrix and $\boldsymbol{\beta}$ the vector of parametric coefficients. Because the treaty catch locations were consolidated to a single label, fishery is perfectly determined by recovery location and was not included as a separate term. Sampling effort entered as an offset with its coefficient fixed at unity, which constrains expected recoveries to scale proportionally with the number of fish sampled and makes the linear predictor an estimate of tag density; $\exp(\mathbf{X}_i\hat{\boldsymbol{\beta}}+\sum_j \hat{f}_j(x_{ij}))$ recovers $\hat{\theta}_i$ directly, and $\hat{\mu}_i$ is the expected number of recoveries. Specifying sampling effort as an offset rather than as a covariate avoids the circularity that arises when a variable appears simultaneously in the denominator of the response and among the predictors. Predictions for unsampled strata were generated by substituting $\log(N^{Caught})$ for the offset, which scales tag density to the full landed catch. I used a Tweedie distribution with a log-link because of the right-skewness in the recovery counts and the increase in variance with the mean (@fig-mean-variance). The Tweedie distribution includes a dispersion parameter ($\phi$) and a power parameter ($p$), both of which are estimated when fitting the model. The GAM was fit in R using the `mgcv` package (@Wood2011).
+with smooths on `run_year` and `month` and a parametric effect of `recovery_location_name`. Fishery is determined by recovery location after consolidation and is not a separate term. The fitting frame is built from sampled strata, so sampled strata with zero recoveries are retained. Predictions for unsampled strata substitute $\log(N^{Caught})$ for the offset (`gam-predictions` chunk). @fig-mean-variance shows the response distribution and the fitted Tweedie variance function.
 
 ```{r}
 #| label: gam
@@ -791,9 +763,11 @@ count(zero_check, band, season)
 zero_check |> arrange(desc(expected)) |> head(15)
 ```
 
-##### Stock and Age Composition
+### Stock and age composition
 
-Once $CWT_{Est}$ is evaluated, empirical stock and age composition data can be used to partition the estimated CWT recoveries from the unsampled strata into their stock- and age-specific components. Composition was applied using a lagging five-year window: recoveries from years $t-4$ through $t$ inform composition for year $t$. A lagging rather than centered window was used because composition in a given year reflects brood cohorts that have already recruited to the fishery; recoveries from subsequent years carry information about cohorts not yet present. The time-pooled composition for a given month and area was used as a fallback for year-month-area combinations lacking recovery data.
+Predicted recoveries are apportioned to stock and age using the composition of decoded tags (tag status 1) recovered in the same month and area over a lagging five-year window (years $t-4$ through $t$), with the time-pooled month × area composition as a fallback where the window has no recoveries. Lost, unreadable and unresolved tags count toward tag density but are assumed to share the composition of decoded tags. Brood year for tag codes outside the indicator stock lookup comes from the RMIS release file. Ages are truncated to 0–5, and ages below 2 are dropped.
+
+This chunk produces the point estimate of composition. The Dirichlet treatment of composition uncertainty (empirical Bayes prior, $\kappa = 50$) is in `R/method2_uncertainty.R`.
 
 ```{r}
 #| label: stock-composition
@@ -842,7 +816,7 @@ tmp2 <- left_join(check, rmis_release[,c("tag_code_or_release_id","brood_year")]
 res2 <- rbind(tmp[tmp$stock != 'Other',], tmp2)
 ```
 
-Empirical estimates of stock and age composition can be calculated from RMIS recovery data (@fig-stock-comp). Stocks were assigned to RMIS data by joining the stock names in CAMP based on tag code. A considerable number of the recoveries in the RMIS data were unassigned, indicating considerable influence by non-PST stocks on the stock composition of the fishery. It is notable, however, that the proportion of the stock composition comprising Puget Sound stocks rises in the winter months (Nov-Apr).
+Observed monthly stock and age composition (@fig-stock-comp) shifts sharply between seasons: Puget Sound stocks and younger fish make up a much larger share of recoveries in winter (November–April) than in summer (May–October). Season-level summaries are in Table 1 of the manuscript.
 
 ```{r}
 #| label: stock-age-comp
@@ -909,8 +883,6 @@ age_comp <- stock_age_comp |>
 cowplot::plot_grid(stock_comp,age_comp,ncol = 1,labels='auto',align='v')
 ggsave(filename = "out/stock_age_comp.png", plot = last_plot(), height = 8, width = 7, units = "in", dpi = 300)
 ```
-
-The monthly age composition estimated from CWTs shows the fishery largely dominated by Age 3 and 4 fish, with a small increase in the number of Age 5+ fish over the summer months followed by the arrival of Age 2 and more Age 3 fish in November and December. There are currently only two tag recoveries in this fishery from the month of October and both were Age 4s.
 
 ```{r}
 #| label: fig-cwt-stock-age
@@ -1044,12 +1016,20 @@ pred_only |>
 ggsave(filename = "out/cwt_res.png", plot = last_plot(), height = 4, width = 8, units = "in", dpi = 300)
 ```
 
+### Ratio estimator
+
+The ratio estimator (manuscript Equation 2) borrows tag density and composition from the nearest sampled donor stratum in the same fishery and area, within 90 days between month midpoints (ties go to the earlier donor; zero-recovery donors are included):
+
+$$\widehat{CWT}_{u,k} = N^{Caught}_u \cdot \theta_d \cdot p_{d,k}, \qquad \theta_d = \frac{N^{CWT}_d}{N^{Sampled}_d}$$ {#eq-ratio}
+
+where $u$ is the unsampled stratum, $d$ its donor, and $p_{d,k}$ the donor's decoded-tag composition for stock-age category $k$. It is applied to the same unsampled strata as the tag density model.
+
 ```{r}
 #| label: ratio-estimator
 #| echo: false
 #| output: false
 
-# Method 1: nearest-donor ratio estimator (@eq-ratio-scalar), applied to the
+# Ratio estimator (manuscript Equation 2), applied to the
 # SAME unsampled strata as the tag density model so the two are comparable.
 SEARCH_WINDOW   <- 90     # days between month midpoints
 MIN_SAMPLE_FRAC <- 0.05   # donor sampling-fraction floor, sensitivity only
@@ -1147,6 +1127,8 @@ stopifnot(all(lengths(list(method1_all, method1_pst, td_on_matched,
                            method1_all_hi, n_winter_summer_donor)) == 1))
 ```
 
+A supplementary analysis (not part of the estimator) borrows, for strata without a donor in the search window, from the same fishery, area and month in the nearest sampled year, up to five years away:
+
 ```{r}
 #| label: ratio-estimator-tier2
 #| echo: false
@@ -1200,85 +1182,35 @@ est_re |>
 ggsave(filename = "out/cwt_res_re.png", plot = last_plot(), height = 4, width = 8, units = "in", dpi = 300)
 ```
 
-The ratio estimator found a donor within `r SEARCH_WINDOW` days for `r n_re_matched` of the `r nrow(recip)` unsampled strata; the remaining `r n_re_unmatched` strata (`r nfmt(catch_re_unmatched)` fish) had no sampled stratum in the same fishery and area within the search window. Across matched strata, the ratio estimator estimated `r nfmt(method1_all)` CWT recoveries, of which `r nfmt(method1_pst)` (`r round(100*method1_pst/method1_all)`%) were PST indicator stocks, compared with `r nfmt(td_on_matched)` from the tag density model for the same strata. Donors sampling less than `r 100*MIN_SAMPLE_FRAC`% of their catch (`r n_low_frac` strata) contributed `r nfmt(method1_all - method1_all_hi)` of the total. Of `r n_winter_recip` winter recipients, `r n_winter_summer_donor` borrowed from a summer donor.
+## Results
 
-Applying the stock and age compositions to the predicted CWT recoveries yielded the results displayed in @fig-cwt-stock-age. In sum, `r nfmt(total_pred)` additional CWT recoveries were expected to have occurred between `r START_YEAR` and `r END_YEAR` in the unsampled strata. Of those, `r nfmt(total_apportioned)` could be apportioned into stock and age components; the remainder fall in `r n_unapportioned` strata for which no CWT recoveries have been reported in the corresponding month and area over the full time series. Of the apportioned total, `r nfmt(total_pst)` were expected to be PST indicator stocks. To quantify the statistical uncertainty in the estimates, I performed a bootstrap simulation that resampled the model training data with replacement and drew stock and age compositions from their Dirichlet posteriors. Details are provided in [Appendix B](#sec-appB).
+### Tag density model
 
-Auxiliaries for the CTC ERA can be prepared by mapping the additional CWT recoveries to the appropriate tag codes. Accounting for the additional fishery mortalities in the unsampled strata should reduce bias in the CYERs and more accurately measure fishery exploitation on PST indicator stocks.
+Predicted CWT recoveries in the `r nrow(recip)` unsampled strata total `r nfmt(total_pred)` (point estimate). Of these, `r nfmt(total_apportioned)` could be apportioned to stock and age; the remaining `r nfmt(cwt_unapportioned)` fall in `r n_unapportioned` strata with no recoveries in the corresponding month and area over the full time series. Of the apportioned total, `r nfmt(total_pst)` are PST indicator stocks (@fig-cwt-stock-age).
 
-## Conclusions & Recommendations
+These are point estimates. The posterior medians and 95% credible intervals reported in the manuscript come from `R/method2_uncertainty.R`, which simulates from the fitted model's posterior and draws composition from its Dirichlet posterior.
 
-The analyses contained within this brief offer a comparison of two separate methods of estimating CWT recoveries from unsampled fishery strata. The first method is a purely analytical one in which CWT recoveries are calculated with a ratio estimator assuming constant stock and age composition between sampled and unsampled fishery strata. The second method models tag density directly as a function of year, month, and recovery area, scales it to the landed catch reported in each unsampled stratum, and partitions the resulting estimates using empirical stock and age composition data.
+### Ratio estimator
 
-Methods differed substantially in the number of PST indicator stock CWTs estimated for the unsampled strata (Method 1: `r nfmt(method1_pst)` compared to Method 2: `r nfmt(total_pst)`). These differences may be related to the ways in which CWT recoveries are estimated in the unsampled strata. Method 1 assumes that CWT recoveries in the unsampled strata are directly proportional to the landed catch ratio of the sampled and unsampled strata (@eq-ratio-scalar); violations of this assumption, such as differences in the relative abundance of ERA-tagged fish between sampled and unsampled strata, could result in inaccurate estimates. Method 1 also requires that a temporally adjacent sampled stratum exist within the search window, and inherits whatever composition that neighbor happens to carry. By contrast, Method 2 models tag density as a smooth function of year, month, and recovery area, which relaxes the assumption of a constant encounter frequency across strata. Tag density varies systematically across months and catch areas (@fig-cwt-per-100, @fig-cwt-encounter-rate), and year, month, and area together explained `r round(dev_expl*100, 1)`% of the deviance remaining after sampling effort is accounted for ($\Delta$AIC = `r round(delta_aic, 1)` relative to an offset-only model). Modeling that variation directly is therefore preferable to borrowing wholesale from an adjacent sampled stratum.
+The ratio estimator found a donor within `r SEARCH_WINDOW` days for `r n_re_matched` of the `r nrow(recip)` unsampled strata; the remaining `r n_re_unmatched` strata (`r nfmt(catch_re_unmatched)` fish) had no sampled stratum in the same fishery and area within the search window. Across matched strata, the ratio estimator estimated `r nfmt(method1_all)` CWT recoveries, of which `r nfmt(method1_pst)` (`r round(100*method1_pst/method1_all)`%) were PST indicator stocks (@fig-res). The tag density model point estimate for the same strata is `r nfmt(td_on_matched)`. Of `r n_winter_recip` winter recipient strata, `r n_winter_summer_donor` borrowed from a summer donor. In the supplementary year-based search, `r t2_n` of the unmatched strata found a donor; `r t2_zero` of those donors recovered no CWTs.
 
-Stock composition in Method 1 was restricted to Puget Sound and WA Coast stocks (@fig-res) because they were wholly informed by the stock and age compositions of nearby sampled strata (i.e., \leq93 days away from the unsampled catch event within the same recovery area) which comprised only those stocks, whereas stock composition in Method 2 was informed by the average empirical distribution of tag recoveries that have occurred in those times and areas over the entire timescale of the dataset (2005--2023). A similar pattern was observed for age composition, although age composition differed less between methods. Differences between both methods might be explained by how each handles stock and age composition. Method 1 borrows the stock and age composition of a single nearby sampled stratum; Method 2 instead uses the composition of all CWT recoveries reported in the same month and area over a lagging five-year window, and treats that composition as uncertain by drawing it from a Dirichlet posterior rather than fixing it at the observed proportion. This matters most where recoveries are sparse: a stratum informed by one or two tags yields an observed composition that is necessarily degenerate, assigning exactly zero to every stock that happened not to appear. Additionally, the empirical stock and age composition data implies that the stock and age composition in unsampled strata (predominantly occurring over winter months) is not always consistent with the stock and age compositions in the sampled strata (predominantly occurring over the summer/fall months) (@fig-stock-comp). For example, the winter months see an increase in representation by Puget Sound stocks and trends towards younger ages in the CWT recoveries. Several limitations of Method 2 warrant note. Predictions for unsampled strata rest on the assumption that tag density is consistent with that in sampled strata of comparable year, month, and area; cross-validation evaluates prediction only within sampled strata and cannot test this assumption. Sampling effort is treated as measured without error, though a small number of strata reported recoveries in excess of the fish sampled, indicating that reported sampling is occasionally unreliable. Compositional data are thin in precisely the strata of greatest interest: `r n_sparse_strata` predicted strata, carrying `r round(pct_catch_sparse)`% of the unsampled catch, have fewer than ten CWT recoveries informing their composition, and `r n_unapportioned` strata had none at all. Finally, the treaty fishery in MA 2 is excluded from the analysis entirely and requires separate treatment.
+## Further analyses
 
-I recommend using Method 2 for the following reasons:
+| Analysis | Script | Manuscript |
+|:--|:--|:--|
+| Posterior simulation and bootstrap comparison | `R/method2_uncertainty.R` | Results; Figures 7 and S1 |
+| Dirichlet prior sensitivity | `R/method2_prior_sensitivity.R` | Table S1 |
+| Hold-out evaluation | `R/method_holdout_validation.R` | Results; Figure 10 |
 
-1)  Modeling tag density directly (i.e., the GAM) produced substantially different estimates of total CWT recoveries of PST indicator stocks than Method 1. I hypothesize that the 93 day search window used by the nearest-neighbor approach in Method 1 to infill missing sampling data is too large, resulting in inappropriate CWT expansion factors; the landed catch ratios ($\tau$) used to scale CWT recovery estimates in the unsampled strata are probably too large for the same reasons. By contrast, Method 2 estimates recoveries from a tag density defined per unit of sampling effort and applies it to the catch actually reported in each unsampled stratum. It therefore does not depend on the quality of a temporal match to a neighboring sampled stratum, and it requires no estimate of how many fish would have been sampled had sampling occurred.
-
-2)  Method 2 relaxes the equal stock and age composition assumption of Method 1 by using month- and area-specific empirical compositions, and propagates the uncertainty in those compositions into the reported confidence intervals rather than treating them as known.
-
-## References
-
-::: {#refs}
-:::
-
-\newpage
-
-## Appendix A {#sec-appA}
+## Appendix: ratio estimator pseudocode
 
 ::: {.callout-note appearance="minimal"}
-**Method 1 Pseudocode**
+For each unsampled stratum $u$:
 
-For each unsampled record $u$:
-
-1.  Identify all sampled records $S$ sharing the same fishery and catch area
-2.  Compute temporal distance $d = |t_u - t_s|$ for each $s \in S$
-3.  Select $s^* = \underset{s \in S}{\operatorname{argmin}}(d)$, subject to $d \leq \delta$
-4.  If no $s^*$ satisfies $d \leq \delta$, leave $u$ unestimated
-5.  For each stock-age category $k$, estimate $\widehat{CWT}_{u,k} = L_u \cdot n_{s^*,k} / N^{Sampled}_{s^*}$
-6.  Ties in $d$ are resolved in favor of the earlier donor; $\delta = 90$ days between month midpoints
+1.  Identify all sampled strata $S$ in the same fishery and catch area.
+2.  Compute the distance $|t_u - t_s|$ between month midpoints for each $s \in S$.
+3.  Select the nearest $s$ with $|t_u - t_s| \leq 90$ days as the donor $d$; ties go to the earlier stratum.
+4.  If no stratum qualifies, leave $u$ unestimated.
+5.  Compute $\theta_d = N^{CWT}_d / N^{Sampled}_d$, using all tags physically present.
+6.  For each stock-age category $k$, $\widehat{CWT}_{u,k} = N^{Caught}_u \cdot \theta_d \cdot p_{d,k}$, where $p_{d,k}$ is the donor's decoded-tag composition. A donor with zero recoveries contributes zero.
 :::
-
-\newpage
-
-## Appendix B {#sec-appB}
-
-**Method 2 Bootstrap Uncertainty Analysis**
-
-I quantified uncertainty using a nonparametric bootstrap that propagated two independent sources of error to the final CWT estimates: error in the fitted tag density model, and error in the empirical stock and age composition used to apportion the resulting counts. I ran 1,000 bootstrap iterations. In each iteration the GAM training data were resampled with replacement and the model refit, predictions were generated for the unsampled strata by substituting landed catch for the sampling offset, and a stock and age composition vector was drawn for each stratum from its Dirichlet posterior.
-
-Composition uncertainty was treated as a multinomial sampling problem. For a stratum in which the windowed recoveries yield counts $n = (n_1,\dots,n_K)$ across $K$ stock-age categories, and with a Dirichlet prior $\text{Dir}(\alpha)$ on the composition $p$, the posterior is conjugate:
-
-$$p \mid n \sim \text{Dir}(\alpha + n)$$
-
-Counts were assembled over a fixed category grid spanning all observed stock-age combinations, so that categories unobserved in a given stratum retain positive posterior probability rather than being treated as structurally absent. I compared three priors: Jeffreys ($\alpha_k = 1/2$), uniform ($\alpha_k = 1$), and an empirical-Bayes prior centered on the time-pooled composition for that month and area ($\alpha_k = \kappa\bar{p}_k$). The first two center the prior on equal proportions across all $K$ categories, which is inconsistent with the observed composition of the fishery; the empirical-Bayes prior instead shrinks sparse strata toward the pooled composition, formalizing the borrowing that the rolling window performs implicitly. Results are reported under the empirical-Bayes prior. The 95% confidence intervals were calculated from the 2.5th and 97.5th percentiles of the bootstrap distribution and the medians (50th percentile) are reported as the central tendencies.
-
-The bootstrap median for the total estimated CWT recoveries across all stocks (including non-PST stocks) was 1,772 (95% CI: 1,532--2,008), closely matching the point estimate of `r nfmt(total_pred)`. For PST indicator stocks only, the median estimate under the empirical-Bayes prior was 1,153 (95% CI: 976--1,325).
-
-The PST estimate was insensitive to the strength of the empirical-Bayes prior, varying by less than 2% across $\kappa$ ranging from 5 to 200 (Table B1). Prior *strength* therefore has little influence on the result. Prior *centering*, by contrast, has a substantial one: priors centered on equal proportions across all $K$ categories produced PST totals roughly 35% higher than the empirical-Bayes prior. Because a single non-PST category accounts for a large share of observed recoveries, distributing prior mass evenly across categories mechanically inflates the estimated PST share. That the three priors do not converge indicates that the sparse strata carry limited independent compositional information -- the same limitation quantified in the main text, where `r n_sparse_strata` of the predicted strata, carrying `r round(pct_catch_sparse)`% of the unsampled catch, have fewer than ten CWT recoveries informing their composition.
-
-| Prior | $\kappa$ | Median | 95% CI |
-|:------|------:|-------:|:-----------|
-| Empirical Bayes | 5   | 1,136 | 931--1,348 |
-| Empirical Bayes | 25  | 1,147 | 974--1,330 |
-| Empirical Bayes | 50  | 1,153 | 976--1,325 |
-| Empirical Bayes | 200 | 1,149 | 993--1,322 |
-| Jeffreys ($\alpha_k = 1/2$) | -- | 1,508 | 1,293--1,727 |
-| Uniform ($\alpha_k = 1$)    | -- | 1,568 | 1,344--1,795 |
-
-: Sensitivity of the estimated PST indicator stock total to the choice of Dirichlet prior. {#tbl-prior-sensitivity}
-
-The upper bound of the 95% credible interval for PST stocks remained well below the Method 1 estimate of `r nfmt(method1_pst)`, indicating that the discrepancy between methods is not attributable to statistical uncertainty in Method 2. A small number of bootstrap iterations (fewer than 1 in 500) failed to converge when a resample contained too few unique values of `run_year` or `month` to support the default basis dimension; these iterations were discarded.
-
-\newpage
-
-```{=latex}
-\begin{center}
-\includegraphics[width=0.8\textwidth]{out/method2_prior_comparison.png}
-
-\textbf{Figure B1.} Bootstrap distributions of total estimated CWT recoveries from unsampled strata under the empirical-Bayes prior. Dashed blue lines indicate median estimates and dashed red lines indicate 95\% confidence intervals.
-\end{center}
-```

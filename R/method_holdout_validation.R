@@ -25,6 +25,7 @@ SEARCH_WINDOW <- 90
 HOLD_FRAC     <- 0.5
 KAPPA         <- 50
 WINDOW_YRS    <- 0:4
+N_DRAW        <- 500    # posterior draws per replicate for interval coverage
 
 # =====================================================================
 # 1. Prepare strata and recovery-level data
@@ -85,7 +86,7 @@ rdirichlet_1 <- function(alpha) {
 # 2. Tag density model: fit once per replicate, return count AND PST draw
 # =====================================================================
 
-predict_td <- function(hold_idx, avail_rec) {
+predict_td <- function(hold_idx, avail_rec, draw_seed) {
   
   train <- cwt_fit[-hold_idx, ]
   test  <- cwt_fit[ hold_idx, ]
@@ -102,6 +103,23 @@ predict_td <- function(hold_idx, avail_rec) {
   
   cnt <- tryCatch(as.numeric(predict(m_h, newdata = test, type = 'response')),
                   error = function(e) rep(NA_real_, nrow(test)))
+  
+  # Posterior draws for interval coverage, as in method2_uncertainty.R:
+  #   mu_draws - expected recoveries (credible interval, as reported)
+  #   y_draws  - Tweedie observations around mu (posterior predictive), the
+  #              appropriate comparison for an observed count
+  # Run under their own seed; withr::with_seed restores the global RNG state
+  # afterwards, so every other hold-out result is unchanged by this block.
+  draws <- tryCatch(withr::with_seed(draw_seed, {
+    Xp  <- predict(m_h, newdata = test, type = 'lpmatrix')   # excludes offset
+    Vb  <- vcov(m_h, unconditional = TRUE)
+    bd  <- matrix(rnorm(N_DRAW * ncol(Vb)), N_DRAW) %*% chol(Vb)
+    bd  <- sweep(bd, 2, coef(m_h), '+')
+    mu  <- exp(sweep(bd %*% t(Xp), 2, test$log_exposure, '+'))
+    y   <- matrix(rTweedie(as.vector(mu), p = m_h$family$getTheta(TRUE),
+                           phi = m_h$scale), nrow = N_DRAW)
+    list(mu = mu, y = y)
+  }), error = function(e) NULL)
   
   pooled <- avail_rec |>
     count(month, recovery_location_name, cat_id, name = 'n') |>
@@ -133,10 +151,12 @@ predict_td <- function(hold_idx, avail_rec) {
     pst_pred[i] <- cnt[i] * sum(rdirichlet_1(alpha)[pst_idx])
   }
   
-  data.frame(stratum_id     = test$stratum_id,
-             observed_total = test$obs_total, predicted_total = cnt,
-             observed_pst   = test$obs_pst,   predicted_pst   = pst_pred,
-             method = 'Tag density model')
+  out <- data.frame(stratum_id     = test$stratum_id,
+                    observed_total = test$obs_total, predicted_total = cnt,
+                    observed_pst   = test$obs_pst,   predicted_pst   = pst_pred,
+                    method = 'Tag density model')
+  attr(out, 'draws') <- draws
+  out
 }
 
 # =====================================================================
@@ -195,7 +215,8 @@ run_replicate <- function(rep_id) {
     blinded   <- cwt_fit$stratum_id[idx]
     avail_rec <- rec |> filter(!stratum_id %in% blinded)
     
-    td <- predict_td(idx, avail_rec)
+    seed_offset <- if (label == 'winter') 0L else 500000L
+    td <- predict_td(idx, avail_rec, draw_seed = 100000L + seed_offset + rep_id)
     re <- predict_ratio(idx, avail_rec)
     if (is.null(td)) return(NULL)
     
@@ -203,6 +224,22 @@ run_replicate <- function(rep_id) {
     # estimator found a donor (mirrors the operational comparison)
     keep <- intersect(re$stratum_id[!is.na(re$predicted_total)],
                       td$stratum_id[!is.na(td$predicted_total)])
+    
+    # Interval coverage for the summed total over the scored strata
+    dr  <- attr(td, 'draws')
+    cov <- tibble(method = 'Tag density model', cover_cred = NA, cover_pred = NA,
+                  obs_below = NA, obs_above = NA)
+    if (!is.null(dr)) {
+      cols  <- match(keep, td$stratum_id)
+      obs   <- sum(td$observed_total[cols])
+      ci_mu <- quantile(rowSums(dr$mu[, cols, drop = FALSE]), c(0.025, 0.975))
+      ci_y  <- quantile(rowSums(dr$y[,  cols, drop = FALSE]), c(0.025, 0.975))
+      cov <- tibble(method     = 'Tag density model',
+                    cover_cred = obs >= ci_mu[1] & obs <= ci_mu[2],
+                    cover_pred = obs >= ci_y[1]  & obs <= ci_y[2],
+                    obs_below  = obs <  ci_y[1],
+                    obs_above  = obs >  ci_y[2])
+    }
     
     res <- bind_rows(td, re) |> filter(stratum_id %in% keep)
     
@@ -227,6 +264,7 @@ run_replicate <- function(rep_id) {
         
         .groups = 'drop'
       ) |>
+      left_join(cov, by = 'method') |>
       mutate(holdout = label, rep = rep_id)
   }
   
@@ -240,7 +278,7 @@ perf <- bind_rows(lapply(seq_len(N_REP), function(i) {
 }))
 
 # =====================================================================
-# 5. Summarise: total and PST, side by side
+# 5. Summarize: total and PST, side by side
 # =====================================================================
 
 q   <- function(x, p) as.numeric(quantile(x, p, na.rm = TRUE))
@@ -287,6 +325,21 @@ print(as.data.frame(
               pct_favouring    = round(100*mean(gap > 0, na.rm = TRUE), 1),
               .groups = 'drop')), row.names = FALSE)
 
+# Interval coverage of the tag density model (summed total, scored strata)
+cat("\n=== 95% interval coverage, tag density model (total recoveries) ===\n")
+cat("(credible = interval for expected recoveries, as reported in the paper;\n",
+    " predictive = adds Tweedie observation noise, the fair test for counts)\n\n")
+print(as.data.frame(
+  perf |>
+    filter(method == 'Tag density model') |>
+    group_by(holdout) |>
+    summarise(reps           = sum(!is.na(cover_pred)),
+              pct_credible   = round(100 * mean(cover_cred, na.rm = TRUE), 1),
+              pct_predictive = round(100 * mean(cover_pred, na.rm = TRUE), 1),
+              pct_obs_below  = round(100 * mean(obs_below,  na.rm = TRUE), 1),
+              pct_obs_above  = round(100 * mean(obs_above,  na.rm = TRUE), 1),
+              .groups = 'drop')), row.names = FALSE)
+
 # =====================================================================
 # 6. Plot: 4 panels -- quantity (total/PST) x holdout (summer/winter)
 # =====================================================================
@@ -320,7 +373,6 @@ p <- ggplot(plot_dat, aes(x = ratio, fill = method)) +
 
 print(p)
 ggsave("out/holdout_validation_combined.png", p, height = 7, width = 7, dpi = 300)
-
 
 perf |>
   mutate(share   = ratio_pst / ratio_total,
