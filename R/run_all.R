@@ -31,3 +31,7 @@ source("R/method_holdout_validation.R")
 # 5. Record the computing environment -----------------------------------
 writeLines(capture.output(sessionInfo()), "out/sessionInfo.txt")
 message("Done. Outputs written to out/")
+ 
+# install.packages("renv")
+# renv::init()       # scans the code, records packages and versions
+# renv::snapshot()   # writes renv.lock
